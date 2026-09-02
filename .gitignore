@@ -1,0 +1,34 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Host key (сертификат SSH-сервера)
+host_key
+
+# Пароли и конфиги с реальными значениями
+frpc.toml
+password.txt
+
+# SSH ключи клиента (tiny-frpc использует ~/.ssh/id_rsa)
+.ssh/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+release/
+*.tar.gz
+*.zip
+
+# Testing
+*.test

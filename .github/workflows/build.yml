@@ -1,0 +1,61 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Download winpty files
+        run: |
+          mkdir -p /tmp/winpty
+          cd /tmp/winpty
+          wget -q https://github.com/rprichard/winpty/releases/download/0.4.3/winpty-0.4.3-msvc2015.zip
+          unzip -q winpty-0.4.3-msvc2015.zip
+          ls -la x64/bin/
+
+      - name: Build modern version (Windows 10 1809+)
+        run: |
+          GOOS=windows GOARCH=amd64 go build -o winssh-tunnel.exe .
+          ls -lh winssh-tunnel.exe
+
+      - name: Build legacy version (Windows 7/Server 2008R2+)
+        run: |
+          GOOS=windows GOARCH=amd64 go build -tags legacy -o winssh-tunnel-legacy.exe .
+          ls -lh winssh-tunnel-legacy.exe
+
+      - name: Verify SHA256 of winpty files
+        run: |
+          cd /tmp/winpty/x64/bin
+          echo "936f611c2129600d35ab7aad45546a837f4f3a9ca7f673e5d66b48c313b9cd75  winpty.dll" | sha256sum -c
+          echo "9add1a61155ec47cf6f347faf776b746eebbde1dc9360d81b8a909da34650642  winpty-agent.exe" | sha256sum -c
+
+      - name: Create release directory
+        run: |
+          mkdir -p release
+          cp winssh-tunnel.exe release/
+          cp winssh-tunnel-legacy.exe release/
+          cp /tmp/winpty/x64/bin/winpty.dll release/
+          cp /tmp/winpty/x64/bin/winpty-agent.exe release/
+          cp frpc.toml.example release/frpc.toml.example || echo "frpc.toml.example not found"
+          cp setup.bat release/
+          cp README.md release/
+          ls -la release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
