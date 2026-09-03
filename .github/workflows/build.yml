@@ -16,20 +16,53 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Download dependencies
-        run: go mod download
+      - name: Check environment
+        run: |
+          Write-Host "Go version:"
+          go version
+          Write-Host ""
+          Write-Host "Go env:"
+          go env
+          Write-Host ""
+          Write-Host "Current dir:"
+          dir
+          Write-Host ""
+          Write-Host "go.mod:"
+          Get-Content go.mod
+
+      - name: Test build (simple test)
+        run: |
+          Write-Host "Testing basic Go build..."
+          echo 'package main; func main() { println("test") }' > test.go
+          go build -o test.exe test.go
+          .\test.exe
+          rm test.go test.exe
+          Write-Host "Basic test OK"
+
+      - name: Download modules
+        run: |
+          Write-Host "Downloading go modules (with retries)..."
+          for ($i = 0; $i -lt 3; $i++) {
+            try {
+              go mod download
+              break
+            } catch {
+              Write-Host "Attempt $($i+1) failed, retrying..."
+              Start-Sleep -Seconds 5
+            }
+          }
 
       - name: Build winssh-tunnel.exe
         run: |
-          go version
-          go env
-          dir
-          type go.mod
-          echo "Downloading dependencies..."
-          go mod download -x
-          echo "Building..."
-          go build -v -x -o winssh-tunnel.exe .
-          dir winssh-tunnel.exe
+          Write-Host "Building winssh-tunnel.exe..."
+          go build -v -o winssh-tunnel.exe .
+          if ($LASTEXITCODE -eq 0) {
+            dir winssh-tunnel.exe
+            Write-Host "✅ Build successful!"
+          } else {
+            Write-Host "❌ Build failed!"
+            exit 1
+          }
 
       - name: Create release files
         run: |
@@ -39,7 +72,7 @@ jobs:
           copy setup.bat release/
           copy README.md release/
           copy QUICKSTART.md release/
-          ls -la release/
+          dir release/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
