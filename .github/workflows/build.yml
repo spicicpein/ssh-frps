@@ -21,11 +21,15 @@ jobs:
 
       - name: Build winssh-tunnel.exe
         run: |
-          $env:GOOS = "windows"
-          $env:GOARCH = "amd64"
-          $env:CGO_ENABLED = "0"
-          go build -v -o winssh-tunnel.exe .
-          ls -la winssh-tunnel.exe
+          go version
+          go env
+          dir
+          type go.mod
+          echo "Downloading dependencies..."
+          go mod download -x
+          echo "Building..."
+          go build -v -x -o winssh-tunnel.exe .
+          dir winssh-tunnel.exe
 
       - name: Create release files
         run: |
