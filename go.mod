@@ -1,6 +1,6 @@
 module winssh-tunnel
 
-go 1.24
+go 1.23
 
 require (
 	github.com/gliderlabs/ssh v0.3.8
