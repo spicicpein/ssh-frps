@@ -16,8 +16,11 @@ jobs:
         with:
           go-version: '1.23'
 
-      - name: Download Go dependencies
-        run: go mod download
+      - name: Download and verify Go dependencies
+        run: |
+          go mod download
+          go mod tidy
+          go mod verify
 
       # Winpty files will be downloaded for future legacy build
       # - name: Download winpty files
@@ -30,7 +33,10 @@ jobs:
 
       - name: Build modern version (Windows 10 1809+)
         run: |
-          GOOS=windows GOARCH=amd64 go build -o winssh-tunnel.exe .
+          go version
+          go env
+          go list ./...
+          GOOS=windows GOARCH=amd64 go build -v -o winssh-tunnel.exe .
           ls -lh winssh-tunnel.exe
 
       # Legacy version requires Go 1.20 - will be added in separate workflow
