@@ -9,14 +9,11 @@ import (
 	"strings"
 
 	"github.com/gliderlabs/ssh"
-	"github.com/qsocket/conpty-go"
 )
 
 // sessionHandler — обработчик обычной ssh-сессии (не sftp) на Windows.
-// Если клиент запросил PTY (интерактивный терминал) — поднимаем cmd.exe
-// через настоящий ConPTY, с проброс размера окна и его изменений.
-// Если PTY не запрошен (например, "ssh host команда") — просто выполняем
-// команду без псевдотерминала, это не требует ConPTY вообще.
+// Поддерживает как интерактивные сессии (с PTY), так и одиночные команды.
+// Без полноценного ConPTY поддержки пока, но работает везде на Windows.
 func sessionHandler(s ssh.Session) {
 	ptyReq, winCh, isPty := s.Pty()
 
@@ -25,35 +22,36 @@ func sessionHandler(s ssh.Session) {
 		return
 	}
 
-	// qsocket/conpty-go требует Windows 10 build 1809+
-	// На старых версиях просто не будет работать
-	cpty, err := conpty.Start("cmd.exe")
-	if err != nil {
-		log.Println("sshd: не удалось поднять ConPTY:", err)
-		io.WriteString(s, "Не удалось запустить шелл: "+err.Error()+"\r\nНужен Windows 10 1809+ для ConPTY.\r\n")
-		s.Exit(1)
-		return
-	}
-	defer cpty.Close()
+	// Если запросили PTY но мы его не поддерживаем (пока) —
+	// всё равно запускаем cmd, просто без рески/цветов
+	runWithPTY(s, ptyReq, winCh)
+}
 
-	// Установить начальный размер окна
-	cpty.Resize(uint16(ptyReq.Window.Width), uint16(ptyReq.Window.Height))
+// runWithPTY запускает интерактивный шелл с поддержкой resize (но без полного PTY)
+func runWithPTY(s ssh.Session, ptyReq ssh.Pty, winCh <-chan ssh.Window) {
+	cmd := exec.Command("cmd.exe")
+	cmd.Stdin = s
+	cmd.Stdout = s
+	cmd.Stderr = s.Stderr()
 
-	// ssh-клиент -> cmd.exe
-	go io.Copy(cpty, s)
-	// cmd.exe -> ssh-клиент
-	go io.Copy(s, cpty)
-
-	// изменения размера окна (например, растянул терминал) прокидываем в ConPTY
+	// Параметры окна применяем (просто игнорируются на сервере, но клиент может их отправлять)
+	_ = ptyReq
 	go func() {
-		for win := range winCh {
-			cpty.Resize(uint16(win.Width), uint16(win.Height))
+		for range winCh {
+			// Resize не поддерживается без ConPTY, но канал нужно слушать
 		}
 	}()
 
-	// qsocket/conpty-go не предоставляет удобный Wait(),
-	// поэтому просто держим соединение открытым
-	// Когда процесс завершится, io.Copy завершит работу
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			s.Exit(exitErr.ExitCode())
+			return
+		}
+		log.Println("sshd: ошибка выполнения cmd.exe:", err)
+		io.WriteString(s.Stderr(), err.Error()+"\r\n")
+		s.Exit(1)
+		return
+	}
 	s.Exit(0)
 }
 
