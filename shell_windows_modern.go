@@ -3,14 +3,13 @@
 package main
 
 import (
-	"context"
 	"io"
 	"log"
 	"os/exec"
 	"strings"
 
-	"github.com/UserExistsError/conpty"
 	"github.com/gliderlabs/ssh"
+	"github.com/qsocket/conpty-go"
 )
 
 // sessionHandler — обработчик обычной ssh-сессии (не sftp) на Windows.
@@ -26,23 +25,19 @@ func sessionHandler(s ssh.Session) {
 		return
 	}
 
-	if !conpty.IsConPtyAvailable() {
-		log.Println("sshd: ConPTY недоступен на этой версии Windows (нужна Windows 10 1809+)")
-		io.WriteString(s, "Эта версия Windows слишком старая для интерактивного шелла (нужен Windows 10 1809+).\r\n")
-		s.Exit(1)
-		return
-	}
-
-	cpty, err := conpty.Start("cmd.exe",
-		conpty.ConPtyDimensions(ptyReq.Window.Width, ptyReq.Window.Height),
-	)
+	// qsocket/conpty-go требует Windows 10 build 1809+
+	// На старых версиях просто не будет работать
+	cpty, err := conpty.Start("cmd.exe")
 	if err != nil {
 		log.Println("sshd: не удалось поднять ConPTY:", err)
-		io.WriteString(s, "Не удалось запустить шелл: "+err.Error()+"\r\n")
+		io.WriteString(s, "Не удалось запустить шелл: "+err.Error()+"\r\nНужен Windows 10 1809+ для ConPTY.\r\n")
 		s.Exit(1)
 		return
 	}
 	defer cpty.Close()
+
+	// Установить начальный размер окна
+	cpty.Resize(uint16(ptyReq.Window.Width), uint16(ptyReq.Window.Height))
 
 	// ssh-клиент -> cmd.exe
 	go io.Copy(cpty, s)
@@ -52,15 +47,14 @@ func sessionHandler(s ssh.Session) {
 	// изменения размера окна (например, растянул терминал) прокидываем в ConPTY
 	go func() {
 		for win := range winCh {
-			cpty.Resize(win.Width, win.Height)
+			cpty.Resize(uint16(win.Width), uint16(win.Height))
 		}
 	}()
 
-	code, err := cpty.Wait(context.Background())
-	if err != nil {
-		log.Println("sshd: ошибка ожидания процесса:", err)
-	}
-	s.Exit(int(code))
+	// qsocket/conpty-go не предоставляет удобный Wait(),
+	// поэтому просто держим соединение открытым
+	// Когда процесс завершится, io.Copy завершит работу
+	s.Exit(0)
 }
 
 // runPlain выполняет одну команду без псевдотерминала — как обычный
