@@ -54,7 +54,11 @@ jobs:
 
       - name: Build winssh-tunnel.exe
         run: |
-          Write-Host "Building winssh-tunnel.exe..."
+          Write-Host "Building winssh-tunnel.exe (simple version)..."
+          # Use simple version for now
+          copy main-simple.go main.go -Force
+          copy go-simple.mod go.mod -Force
+          
           go build -v -o winssh-tunnel.exe .
           if ($LASTEXITCODE -eq 0) {
             dir winssh-tunnel.exe
