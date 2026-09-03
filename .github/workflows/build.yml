@@ -34,10 +34,11 @@ jobs:
       - name: Build modern version (Windows 10 1809+)
         run: |
           go version
-          go env
-          go list ./...
-          GOOS=windows GOARCH=amd64 go build -v -o winssh-tunnel.exe .
-          ls -lh winssh-tunnel.exe
+          go env | grep -E "GOOS|GOARCH|CGO"
+          go list -m all
+          echo "Building..."
+          GOOS=windows GOARCH=amd64 go build -v -x -o winssh-tunnel.exe . 2>&1 | tee build.log
+          ls -lh winssh-tunnel.exe || (echo "Build failed!" && tail -50 build.log && exit 1)
 
       # Legacy version requires Go 1.20 - will be added in separate workflow
       # - name: Build legacy version (Windows 7/Server 2008R2+)
