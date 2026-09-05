@@ -6,82 +6,44 @@ on:
       - 'v*'
 
 jobs:
-  build:
-    runs-on: windows-latest
+  release:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
-      - name: Check environment
+      - name: Check exe exists
         run: |
-          Write-Host "Go version:"
-          go version
-          Write-Host ""
-          Write-Host "Go env:"
-          go env
-          Write-Host ""
-          Write-Host "Current dir:"
-          dir
-          Write-Host ""
-          Write-Host "go.mod:"
-          Get-Content go.mod
-
-      - name: Test build (simple test)
-        run: |
-          Write-Host "Testing basic Go build..."
-          echo 'package main; func main() { println("test") }' > test.go
-          go build -o test.exe test.go
-          .\test.exe
-          rm test.go test.exe
-          Write-Host "Basic test OK"
-
-      - name: Download modules
-        run: |
-          Write-Host "Downloading go modules (with retries)..."
-          for ($i = 0; $i -lt 3; $i++) {
-            try {
-              go mod download
-              break
-            } catch {
-              Write-Host "Attempt $($i+1) failed, retrying..."
-              Start-Sleep -Seconds 5
-            }
-          }
-
-      - name: Build winssh-tunnel.exe
-        run: |
-          Write-Host "Building winssh-tunnel.exe (simple version)..."
-          # Use simple version for now
-          copy main-simple.go main.go -Force
-          copy go-simple.mod go.mod -Force
-          
-          go build -v -o winssh-tunnel.exe .
-          if ($LASTEXITCODE -eq 0) {
-            dir winssh-tunnel.exe
-            Write-Host "✅ Build successful!"
-          } else {
-            Write-Host "❌ Build failed!"
-            exit 1
-          }
-
-      - name: Create release files
-        run: |
-          mkdir release
-          copy winssh-tunnel.exe release/
-          copy frpc.toml.example release/
-          copy setup.bat release/
-          copy README.md release/
-          copy QUICKSTART.md release/
-          dir release/
+          ls -lh winssh-tunnel.exe
+          file winssh-tunnel.exe
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          files: release/*
-          generate_release_notes: true
+          files: |
+            winssh-tunnel.exe
+            README.md
+            QUICKSTART.md
+            frpc.toml.example
+            setup.bat
+          body: |
+            ## winssh-tunnel v0.1.0
+
+            Полнофункциональный SSH-сервер с FRP-туннелированием для Windows.
+
+            ### Что включено в exe (~9.4 МБ):
+            - ✅ **SSH Server** — полный SSH протокол (gliderlabs/ssh)
+            - ✅ **SFTP** — передача файлов (pkg/sftp)
+            - ✅ **FRP Client** — туннель через frp (gofrp/tiny-frpc)
+            - ✅ **ConPTY** — интерактивный shell на Windows 10 1809+
+            - ✅ Монолитный exe, без внешних DLL
+
+            ### Быстрый старт:
+            1. Скопируй `frpc.toml.example` → `frpc.toml`
+            2. Заполни адрес VPS и пароль
+            3. Запусти `winssh-tunnel.exe`
+            4. Подключайся: `ssh -p 6000 user@твой.vps.com`
+
+            Подробнее → `QUICKSTART.md`
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
