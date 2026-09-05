@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -17,33 +20,29 @@ jobs:
           file winssh-tunnel.exe
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            winssh-tunnel.exe
-            README.md
-            QUICKSTART.md
-            frpc.toml.example
-            setup.bat
-          body: |
-            ## winssh-tunnel v0.1.0
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            winssh-tunnel.exe \
+            README.md \
+            QUICKSTART.md \
+            frpc.toml.example \
+            setup.bat \
+            --title "winssh-tunnel ${{ github.ref_name }}" \
+            --notes "## winssh-tunnel ${{ github.ref_name }}
 
-            Полнофункциональный SSH-сервер с FRP-туннелированием для Windows.
+          Полнофункциональный SSH-сервер с FRP-туннелированием для Windows.
 
-            ### Что включено в exe (~9.4 МБ):
-            - ✅ **SSH Server** — полный SSH протокол (gliderlabs/ssh)
-            - ✅ **SFTP** — передача файлов (pkg/sftp)
-            - ✅ **FRP Client** — туннель через frp (gofrp/tiny-frpc)
-            - ✅ **ConPTY** — интерактивный shell на Windows 10 1809+
-            - ✅ Монолитный exe, без внешних DLL
+          ### Что включено в exe (~9.4 МБ):
+          - ✅ **SSH Server** (gliderlabs/ssh)
+          - ✅ **SFTP** передача файлов (pkg/sftp)
+          - ✅ **FRP Client** туннель через frp (gofrp/tiny-frpc)
+          - ✅ **ConPTY** интерактивный shell на Windows 10 1809+
+          - ✅ Монолитный exe, без внешних DLL
 
-            ### Быстрый старт:
-            1. Скопируй `frpc.toml.example` → `frpc.toml`
-            2. Заполни адрес VPS и пароль
-            3. Запусти `winssh-tunnel.exe`
-            4. Подключайся: `ssh -p 6000 user@твой.vps.com`
-
-            Подробнее → `QUICKSTART.md`
-          generate_release_notes: false
+          ### Быстрый старт:
+          1. Скопируй \`frpc.toml.example\` → \`frpc.toml\`
+          2. Заполни адрес VPS и пароль
+          3. Запусти \`winssh-tunnel.exe\`
+          4. Подключайся: \`ssh -p 6000 user@твой.vps.com\`"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
