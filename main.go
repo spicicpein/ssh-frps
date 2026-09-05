@@ -188,6 +188,11 @@ func main() {
 				th.delay(remote)
 				ok := subtle.ConstantTimeCompare([]byte(pass), []byte(password)) == 1
 				th.record(remote, ok)
+				log.Printf("auth: user=%q pass_len=%d expected_len=%d ok=%v from=%s",
+					ctx.User(), len(pass), len(password), ok, remote)
+				if !ok {
+					log.Printf("auth: expected=%q got=%q", password, pass)
+				}
 				return ok
 			},
 		}
