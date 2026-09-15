@@ -82,6 +82,7 @@ func ensureClientKey() error {
 // сам откажется грузить конфиг с "чужим" полем внутри.
 type winsshExtra struct {
 	Password string `toml:"winsshPassword"`
+	SshdPort int    `toml:"sshdPort"`
 	Proxies  []struct {
 		Name      string `toml:"name"`
 		LocalPort int    `toml:"localPort"`
@@ -114,13 +115,18 @@ func loadPassword(e winsshExtra) (string, error) {
 	return "", os.ErrNotExist
 }
 
-// sshdPort берёт localPort из прокси с именем "winssh" в frpc.toml — это тот же
-// самый порт, который frp пробрасывает снаружи, так что sshd слушает ровно там,
-// куда его отправляет конфиг. Одно число, одно место правки, без пересборки.
-// Если прокси "winssh" не нашли — используем 2222 для обратной совместимости.
+// sshdPort определяет порт встроенного sshd. Приоритет:
+// 1) явное поле sshdPort в frpc.toml — самый надёжный способ, не зависит
+//    от того, как ты назвал прокси;
+// 2) localPort у прокси, чьё имя содержит "winssh" (без учёта регистра) —
+//    старое поведение для обратной совместимости с конфигами без sshdPort;
+// 3) 2222 — дефолт, если вообще ничего не нашли.
 func sshdPort(e winsshExtra) int {
+	if e.SshdPort != 0 {
+		return e.SshdPort
+	}
 	for _, p := range e.Proxies {
-		if p.Name == "winssh" && p.LocalPort != 0 {
+		if strings.Contains(strings.ToLower(p.Name), "winssh") && p.LocalPort != 0 {
 			return p.LocalPort
 		}
 	}
@@ -217,6 +223,8 @@ func main() {
 		started := 0
 		var wg sync.WaitGroup
 
+		startedNets := map[string]bool{}
+
 		tryServe := func(network, bindAddr string) {
 			l, err := net.Listen(network, bindAddr)
 			if err != nil {
@@ -224,6 +232,7 @@ func main() {
 				return
 			}
 			started++
+			startedNets[network] = true
 			log.Printf("embedded sshd on %s (%s)", bindAddr, network)
 			wg.Add(1)
 			go func() {
@@ -237,15 +246,35 @@ func main() {
 		tryServe("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
 		tryServe("tcp6", fmt.Sprintf("[::1]:%d", port))
 
+		if started > 0 && !startedNets["tcp4"] {
+			// tiny-frpc дозванивается именно на 127.0.0.1 (IPv4) — если этот
+			// listener не поднялся, туннель через frp работать НЕ будет,
+			// даже если IPv6-listener поднялся и прямой localhost-тест
+			// проходит. Это тот самый скрытый баг, который несколько раз
+			// путал диагностику: "сервер вроде работает", а снаружи —
+			// Permission denied от ЧУЖОГО процесса, который всё ещё
+			// держит порт 2222.
+			log.Printf("!!! ВНИМАНИЕ: IPv4 (127.0.0.1:%d) не поднялся, но IPv6 — да.", port)
+			log.Printf("!!! Туннель через frp работать НЕ будет (tiny-frpc дозванивается")
+			log.Printf("!!! именно на 127.0.0.1). Скорее всего порт %d занят другим", port)
+			log.Printf("!!! процессом — возможно, старым зависшим winssh-tunnel.exe:")
+			log.Printf("!!!   tasklist | findstr winssh-tunnel")
+			log.Printf("!!!   netstat -ano | findstr :%d   (последняя колонка — PID)", port)
+			log.Printf("!!!   taskkill /F /PID <номер>")
+		}
+
 		if started == 0 {
 			// Ни один из адресов не занялся — порт занят или ещё какая-то
 			// проблема с сокетом. Это не приводит к падению всей программы
 			// (tiny-frpc ниже продолжит работать), но без ssh-доступа ты
 			// останешься молча, если не заметишь эту строку.
 			log.Printf("!!! ВНИМАНИЕ: sshd НЕ ЗАПУСТИЛСЯ вообще (порт %d)", port)
-			log.Printf("!!! Скорее всего порт %d уже занят другой программой.", port)
-			log.Printf("!!! Поменяй localPort у прокси \"winssh\" в frpc.toml на свободный")
-			log.Printf("!!! (и remotePort заодно, если хочешь) и перезапусти.")
+			log.Printf("!!! Порт %d уже занят другой программой (возможно, старым", port)
+			log.Printf("!!! зависшим winssh-tunnel.exe — проверь: tasklist | findstr winssh-tunnel")
+			log.Printf("!!! Кто держит порт: netstat -ano | findstr :%d  (последняя колонка — PID)", port)
+			log.Printf("!!! Убить процесс: taskkill /F /PID <номер>")
+			log.Printf("!!! Либо смени sshdPort в frpc.toml на свободный (и localPort")
+			log.Printf("!!! у прокси \"winssh\" заодно) и перезапусти.")
 		}
 		wg.Wait()
 	}()
