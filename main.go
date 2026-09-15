@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,6 +183,11 @@ func main() {
 			Handler: sessionHandler, // из shell_windows.go / shell_other.go
 			SubsystemHandlers: map[string]ssh.SubsystemHandler{
 				"sftp": sftpHandler, // из sftp.go
+			},
+			ConnCallback: func(ctx ssh.Context, conn net.Conn) net.Conn {
+				log.Printf("raw tcp accept: remote=%s local=%s",
+					conn.RemoteAddr(), conn.LocalAddr())
+				return conn
 			},
 			PasswordHandler: func(ctx ssh.Context, pass string) bool {
 				remote := ctx.RemoteAddr().String()
