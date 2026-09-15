@@ -206,17 +206,48 @@ func main() {
 			log.Fatal("host key parse error:", err)
 		}
 
-		log.Println("embedded sshd on", addr)
-		err := srv.ListenAndServe()
-		if err != nil {
-			// Порт занят или ещё какая-то проблема с сокетом — это не приводит
-			// к падению всей программы (tiny-frpc ниже продолжит работать), но
-			// без ssh-доступа ты останешься молча, если не заметишь эту строку.
-			log.Printf("!!! ВНИМАНИЕ: sshd НЕ ЗАПУСТИЛСЯ на %s: %v", addr, err)
+		// ВАЖНО: слушаем 127.0.0.1 и [::1] ОТДЕЛЬНЫМИ listener'ами, а не одним
+		// дефолтным ":2222". На Windows dual-stack сокет (один ":2222" на все
+		// интерфейсы) иногда не отдаёт IPv4-соединения в Accept() корректно —
+		// TCP-хендшейк на уровне ОС проходит, net.Dial() у вызывающего кода
+		// репортует успех, но данные до нашего sshd не доходят и Accept()
+		// никогда не срабатывает. tiny-frpc дозванивается именно на
+		// 127.0.0.1, так что этот адрес должен слушаться ЯВНО, не через
+		// авто-dual-stack ":порт".
+		started := 0
+		var wg sync.WaitGroup
+
+		tryServe := func(network, bindAddr string) {
+			l, err := net.Listen(network, bindAddr)
+			if err != nil {
+				log.Printf("sshd: не слушаю на %s (%s): %v", bindAddr, network, err)
+				return
+			}
+			started++
+			log.Printf("embedded sshd on %s (%s)", bindAddr, network)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := srv.Serve(l); err != nil {
+					log.Printf("sshd: Serve(%s) завершился: %v", bindAddr, err)
+				}
+			}()
+		}
+
+		tryServe("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
+		tryServe("tcp6", fmt.Sprintf("[::1]:%d", port))
+
+		if started == 0 {
+			// Ни один из адресов не занялся — порт занят или ещё какая-то
+			// проблема с сокетом. Это не приводит к падению всей программы
+			// (tiny-frpc ниже продолжит работать), но без ssh-доступа ты
+			// останешься молча, если не заметишь эту строку.
+			log.Printf("!!! ВНИМАНИЕ: sshd НЕ ЗАПУСТИЛСЯ вообще (порт %d)", port)
 			log.Printf("!!! Скорее всего порт %d уже занят другой программой.", port)
 			log.Printf("!!! Поменяй localPort у прокси \"winssh\" в frpc.toml на свободный")
 			log.Printf("!!! (и remotePort заодно, если хочешь) и перезапусти.")
 		}
+		wg.Wait()
 	}()
 
 	// 2) встроенный tiny-frpc клиент — дозванивается до frps по SSH Tunnel Gateway.
