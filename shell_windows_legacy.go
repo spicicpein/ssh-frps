@@ -65,6 +65,14 @@ func sessionHandler(s ssh.Session) {
 	}
 	defer wp.Close()
 
+	// Та же причина кракозябр, что и в modern-версии (shell_windows_modern.go):
+	// cmd.exe по умолчанию пишет в OEM-кодировке консоли, а SSH-клиент
+	// ждёт UTF-8. Здесь (в отличие от modern) wp.StdIn — это io.Writer, а
+	// не io.Reader, который можно обернуть в MultiReader, поэтому просто
+	// пишем chcp напрямую, ДО того как запустить проброс реального ввода
+	// пользователя.
+	_, _ = wp.StdIn.Write([]byte("chcp 65001>nul\r\n"))
+
 	// ssh-клиент -> cmd.exe
 	go io.Copy(wp.StdIn, s)
 	// cmd.exe -> ssh-клиент
@@ -94,7 +102,10 @@ func runPlain(s ssh.Session) {
 		s.Exit(1)
 		return
 	}
-	cmd := exec.Command("cmd.exe", "/c", cmdline)
+	// Та же история с кракозябрами, что в интерактивном режиме — cmd.exe
+	// пишет в OEM-кодировке, SSH-клиент ждёт UTF-8. chcp>nul && ... не
+	// оставляет служебного вывода, только результат самой команды.
+	cmd := exec.Command("cmd.exe", "/c", "chcp 65001>nul && "+cmdline)
 	cmd.Stdin = s
 	cmd.Stdout = s
 	cmd.Stderr = s.Stderr()

@@ -30,7 +30,15 @@ func sessionHandler(s ssh.Session) {
 // runWithPTY запускает интерактивный шелл с поддержкой resize (но без полного PTY)
 func runWithPTY(s ssh.Session, ptyReq ssh.Pty, winCh <-chan ssh.Window) {
 	cmd := exec.Command("cmd.exe")
-	cmd.Stdin = s
+	// cmd.exe по умолчанию выводит текст в OEM-кодировке консоли (обычно
+	// CP866 на русской Windows), а SSH-клиенты (PuTTY/KiTTY и т.д.) чаще
+	// всего ждут UTF-8 — отсюда кракозябры на кириллице. "Впрыскиваем"
+	// команду переключения кодовой страницы В САМОЕ НАЧАЛО ввода cmd.exe,
+	// ДО того как реальные нажатия клавиш пользователя туда попадут —
+	// MultiReader читает наш chcp первым, а дальше прозрачно передаёт то,
+	// что реально печатает пользователь. ">nul" прячет служебное
+	// сообщение "Active code page: 65001", чтобы не мусорить экран.
+	cmd.Stdin = io.MultiReader(strings.NewReader("chcp 65001>nul\r\n"), s)
 	cmd.Stdout = s
 	cmd.Stderr = s.Stderr()
 
@@ -65,7 +73,10 @@ func runPlain(s ssh.Session) {
 		s.Exit(1)
 		return
 	}
-	cmd := exec.Command("cmd.exe", "/c", cmdline)
+	// Та же история с кракозябрами, что в интерактивном режиме — cmd.exe
+	// пишет в OEM-кодировке, SSH-клиент ждёт UTF-8. chcp>nul && ... не
+	// оставляет служебного вывода, только результат самой команды.
+	cmd := exec.Command("cmd.exe", "/c", "chcp 65001>nul && "+cmdline)
 	cmd.Stdin = s
 	cmd.Stdout = s
 	cmd.Stderr = s.Stderr()
