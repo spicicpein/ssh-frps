@@ -82,10 +82,15 @@ func ensureClientKey() error {
 // сам откажется грузить конфиг с "чужим" полем внутри.
 type winsshExtra struct {
 	Password string `toml:"winsshPassword"`
-	SshdPort int    `toml:"sshdPort"`
 	Proxies  []struct {
 		Name      string `toml:"name"`
 		LocalPort int    `toml:"localPort"`
+		// Winssh отмечает: "это тот самый прокси, чей localPort — это порт
+		// встроенного sshd". Один явный флаг вместо двух чисел, которые
+		// раньше нужно было вручную держать одинаковыми (sshdPort и
+		// localPort по отдельности). Теперь единственный источник
+		// правды — localPort у ЭТОГО прокси.
+		Winssh bool `toml:"winssh"`
 	} `toml:"proxies"`
 }
 
@@ -116,14 +121,16 @@ func loadPassword(e winsshExtra) (string, error) {
 }
 
 // sshdPort определяет порт встроенного sshd. Приоритет:
-// 1) явное поле sshdPort в frpc.toml — самый надёжный способ, не зависит
-//    от того, как ты назвал прокси;
+// 1) localPort у прокси, помеченного winssh = true — явный, надёжный способ,
+//    без дублирования числа в двух местах конфига;
 // 2) localPort у прокси, чьё имя содержит "winssh" (без учёта регистра) —
-//    старое поведение для обратной совместимости с конфигами без sshdPort;
+//    старое поведение для обратной совместимости со старыми конфигами;
 // 3) 2222 — дефолт, если вообще ничего не нашли.
 func sshdPort(e winsshExtra) int {
-	if e.SshdPort != 0 {
-		return e.SshdPort
+	for _, p := range e.Proxies {
+		if p.Winssh && p.LocalPort != 0 {
+			return p.LocalPort
+		}
 	}
 	for _, p := range e.Proxies {
 		if strings.Contains(strings.ToLower(p.Name), "winssh") && p.LocalPort != 0 {
@@ -164,7 +171,11 @@ func (t *throttle) record(remote string, ok bool) {
 	}
 }
 
-func main() {
+// runApp — вся боевая логика: встроенный sshd + tiny-frpc клиент. Раньше
+// это было прямо в main(), но для поддержки Windows-службы нужно уметь
+// запускать её либо в обычном консольном режиме, либо под управлением SCM
+// (Service Control Manager) — см. service_windows.go / service_other.go.
+func runApp() {
 	// 1) встроенный SSH-сервер — сюда попадают снаружи через туннель
 	if err := ensureHostKey("host_key"); err != nil {
 		log.Fatal("host key error:", err)
@@ -310,4 +321,22 @@ func main() {
 	}
 
 	select {}
+}
+
+// main — тонкая точка входа. Вся боевая логика — в runApp(). Здесь только
+// разбор режима запуска: обычная консоль, установка/удаление Windows-службы,
+// или запуск под управлением Service Control Manager. Платформо-зависимая
+// часть — в service_windows.go (Windows) и service_other.go (остальные).
+func main() {
+	// У служб Windows рабочая директория по умолчанию — C:\Windows\System32,
+	// а не папка exe. Без этого host_key, frpc.toml, id_rsa и т.д. ищутся
+	// не там. chdir делаем всегда, а не только в режиме службы — так
+	// программа ведёт себя одинаково, откуда бы её ни запустили (двойной
+	// клик, планировщик, служба).
+	if exe, err := os.Executable(); err == nil {
+		if err := os.Chdir(filepath.Dir(exe)); err != nil {
+			log.Printf("не смог перейти в папку программы: %v", err)
+		}
+	}
+	runServiceAware(runApp)
 }
