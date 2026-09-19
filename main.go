@@ -227,8 +227,14 @@ func sshdPort(e winsshExtra) int {
 			return p.LocalPort
 		}
 	}
+	// Фолбэк по имени — только на случай СТАРЫХ конфигов без "winssh = true".
+	// Точное совпадение имени "winssh" ИЛИ имя, заканчивающееся на "-winssh"
+	// (например "winssh-tunnel-winssh"), но НЕ просто "содержит подстроку
+	// winssh где-то внутри" — иначе "winssh-tunnel-rdp" тоже совпал бы
+	// (оба имени начинаются с одного и того же префикса "winssh-tunnel-").
 	for _, p := range e.Proxies {
-		if strings.Contains(strings.ToLower(p.Name), "winssh") && p.LocalPort != 0 {
+		name := strings.ToLower(p.Name)
+		if p.LocalPort != 0 && (name == "winssh" || strings.HasSuffix(name, "-winssh")) {
 			return p.LocalPort
 		}
 	}
