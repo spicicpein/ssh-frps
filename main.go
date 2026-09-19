@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -149,6 +150,26 @@ func parseArgs(args []string) parsedArgs {
 	return p
 }
 
+var winEnvVarPattern = regexp.MustCompile(`%([^%]+)%`)
+
+// expandWinEnv раскрывает переменные окружения в стиле cmd.exe —
+// %USERPROFILE%, %SystemDrive%, %HOMEPATH% и так далее, включая
+// "склеенные" без разделителя: %SystemDrive%%HOMEPATH%. Нужна потому,
+// что такую подстановку обычно делает САМ cmd.exe при вводе команды, а
+// пути из frpc.toml (обычный текстовый файл) или сохранённые в реестре
+// аргументы службы никто автоматически не раскрывает — это наша работа.
+// Если переменная не существует — оставляем %ИМЯ% как есть, так же ведёт
+// себя и сам cmd.exe.
+func expandWinEnv(s string) string {
+	return winEnvVarPattern.ReplaceAllStringFunc(s, func(m string) string {
+		name := m[1 : len(m)-1]
+		if v, ok := os.LookupEnv(name); ok {
+			return v
+		}
+		return m
+	})
+}
+
 type winsshExtra struct {
 	Password string `toml:"winsshPassword"`
 	// ShellDir — папка, в которую попадает пользователь сразу после входа
@@ -259,7 +280,7 @@ func runApp() {
 	if err != nil {
 		log.Fatalf("не могу прочитать %s: %v", configFileName, err)
 	}
-	shellStartDir = extra.ShellDir
+	shellStartDir = expandWinEnv(extra.ShellDir)
 	password, err := loadPassword(extra)
 	if err != nil {
 		log.Fatal("не могу найти пароль — впиши winsshPassword в frpc.toml, задай WINSSH_PASSWORD или создай password.txt:", err)
@@ -412,7 +433,7 @@ func main() {
 	// папку ВЫБРАННОГО конфига (а не обязательно в папку exe) — так с
 	// одного exe можно поднять несколько служб с разными конфигами и
 	// host_key в разных папках, каждая при этом изолирована.
-	configPath := args.Config
+	configPath := expandWinEnv(args.Config)
 	if configPath == "" {
 		if exe, err := os.Executable(); err == nil {
 			configPath = filepath.Join(filepath.Dir(exe), "frpc.toml")

@@ -18,9 +18,19 @@ winsshPassword = "ВАШ_SSH_ПАРОЛЬ"
 # Куда попадаешь сразу после "ssh user@vps -p remotePort" (и откуда
 # выполняются одиночные команды вида "ssh user@vps -p remotePort dir").
 # Пусто/закомментировано = стандартное поведение cmd.exe (обычно папка
-# самой программы). Путь пиши с двойными слэшами или одинарными прямыми —
-# оба варианта работают в TOML.
+# самой программы).
+#
+# Можно использовать переменные окружения Windows в формате %ИМЯ% — так же,
+# как в самом cmd.exe. Раскрываются автоматически:
+#   shellDir = "%USERPROFILE%\\Desktop"        -> C:\Users\user\Desktop
+#   shellDir = "%SystemDrive%\\myfolder"        -> C:\myfolder
+#   shellDir = "%SystemDrive%%HOMEPATH%"        -> склейка без разделителя тоже работает
+#
+# Путь можно писать и просто буквально, с двойными или одинарными слэшами
+# (в TOML оба варианта валидны):
 # shellDir = "C:\\Users\\user\\Desktop"
+# shellDir = "C:/Users/user/Desktop"
+shellDir = "%USERPROFILE%\\Desktop"
 
 # ── Туннели ──────────────────────────────────────────────────────────────────
 # SSH доступ к Windows машине. Флаг "winssh = true" говорит программе:

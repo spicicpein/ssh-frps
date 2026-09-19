@@ -153,7 +153,7 @@ func installService(args parsedArgs) error {
 	// его как есть (и абсолютизируем, чтобы при запуске под SCM, у
 	// которого рабочая директория по умолчанию System32, путь всё равно
 	// разрешился однозначно).
-	configPath := args.Config
+	configPath := expandWinEnv(args.Config)
 	if configPath == "" {
 		configPath = filepath.Join(filepath.Dir(exePath), "frpc.toml")
 	}
