@@ -80,8 +80,82 @@ func ensureClientKey() error {
 // самих tiny-frpc-полей можно было бы и не трогать — но LoadClientConfig
 // у нас всё равно вызывается с strict=false, см. main(), иначе tiny-frpc
 // сам откажется грузить конфиг с "чужим" полем внутри.
+// configFileName — имя файла конфига (просто basename, без пути), который
+// используется во всей программе вместо хардкода "frpc.toml". Директория,
+// где он лежит, становится рабочей директорией процесса (см. main()) — так
+// host_key, id_rsa (для tiny-frpc) и сам конфиг всегда рядом друг с другом,
+// даже если конфиг указан явно через -c/--config в другом месте.
+var configFileName = "frpc.toml"
+
+// shellStartDir — папка, в которую попадает пользователь сразу после входа
+// по SSH (и откуда выполняются одиночные команды). Задаётся полем shellDir
+// в frpc.toml, читается один раз в runApp() и используется в
+// shell_windows_modern.go / shell_windows_legacy.go. Пусто = дефолтное
+// поведение cmd.exe (без явной рабочей директории).
+var shellStartDir string
+
+// parsedArgs — разобранные аргументы командной строки. Используются и при
+// обычном/служебном запуске (актуален только Config), и при установке
+// службы (-i/--install, плюс -k/-n/-d, см. service_windows.go).
+type parsedArgs struct {
+	Install   bool
+	Uninstall bool
+	Start     bool
+	Stop      bool
+	Config    string // -c/--config; пусто = дефолт "frpc.toml" рядом с exe
+	RegKey    string // -k/--key; пусто = дефолт "frpwin"
+	Name      string // -n/--name; пусто = дефолт "Frpwin"
+	Desc      string // -d/--desc; пусто = дефолт "Windows frp"
+}
+
+// parseArgs — простой ручной разбор флагов: поддерживает и короткую, и
+// длинную форму (-i/--install), без внешних зависимостей вроде "flag"
+// пакета (там неудобно делать алиасы одного флага). Порядок аргументов не
+// важен, все опциональны.
+func parseArgs(args []string) parsedArgs {
+	var p parsedArgs
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-i", "--install", "install":
+			p.Install = true
+		case "-u", "--uninstall", "uninstall":
+			p.Uninstall = true
+		case "start":
+			p.Start = true
+		case "stop":
+			p.Stop = true
+		case "-c", "--config":
+			if i+1 < len(args) {
+				i++
+				p.Config = args[i]
+			}
+		case "-k", "--key":
+			if i+1 < len(args) {
+				i++
+				p.RegKey = args[i]
+			}
+		case "-n", "--name":
+			if i+1 < len(args) {
+				i++
+				p.Name = args[i]
+			}
+		case "-d", "--desc", "--description":
+			if i+1 < len(args) {
+				i++
+				p.Desc = args[i]
+			}
+		}
+	}
+	return p
+}
+
 type winsshExtra struct {
 	Password string `toml:"winsshPassword"`
+	// ShellDir — папка, в которую попадает пользователь сразу после входа
+	// по SSH (и откуда выполняются одиночные команды "ssh host команда").
+	// Пусто = поведение по умолчанию (обычно это папка самой программы,
+	// так исторически ведёт себя cmd.exe без явно указанной директории).
+	ShellDir string `toml:"shellDir"`
 	Proxies  []struct {
 		Name      string `toml:"name"`
 		LocalPort int    `toml:"localPort"`
@@ -96,7 +170,7 @@ type winsshExtra struct {
 
 func loadWinsshExtra() (winsshExtra, error) {
 	var e winsshExtra
-	b, err := os.ReadFile("frpc.toml")
+	b, err := os.ReadFile(configFileName)
 	if err != nil {
 		return e, err
 	}
@@ -121,11 +195,11 @@ func loadPassword(e winsshExtra) (string, error) {
 }
 
 // sshdPort определяет порт встроенного sshd. Приоритет:
-// 1) localPort у прокси, помеченного winssh = true — явный, надёжный способ,
-//    без дублирования числа в двух местах конфига;
-// 2) localPort у прокси, чьё имя содержит "winssh" (без учёта регистра) —
-//    старое поведение для обратной совместимости со старыми конфигами;
-// 3) 2222 — дефолт, если вообще ничего не нашли.
+//  1. localPort у прокси, помеченного winssh = true — явный, надёжный способ,
+//     без дублирования числа в двух местах конфига;
+//  2. localPort у прокси, чьё имя содержит "winssh" (без учёта регистра) —
+//     старое поведение для обратной совместимости со старыми конфигами;
+//  3. 2222 — дефолт, если вообще ничего не нашли.
 func sshdPort(e winsshExtra) int {
 	for _, p := range e.Proxies {
 		if p.Winssh && p.LocalPort != 0 {
@@ -183,8 +257,9 @@ func runApp() {
 
 	extra, err := loadWinsshExtra()
 	if err != nil {
-		log.Fatal("не могу прочитать frpc.toml:", err)
+		log.Fatalf("не могу прочитать %s: %v", configFileName, err)
 	}
+	shellStartDir = extra.ShellDir
 	password, err := loadPassword(extra)
 	if err != nil {
 		log.Fatal("не могу найти пароль — впиши winsshPassword в frpc.toml, задай WINSSH_PASSWORD или создай password.txt:", err)
@@ -299,7 +374,7 @@ func runApp() {
 
 	// strict=false: иначе tiny-frpc откажется грузить файл из-за нашего же
 	// собственного поля winsshPassword, которого нет в его схеме.
-	cfg, proxyCfgs, visitorCfgs, _, err := config.LoadClientConfig("frpc.toml", false)
+	cfg, proxyCfgs, visitorCfgs, _, err := config.LoadClientConfig(configFileName, false)
 	if err != nil {
 		log.Fatal("load config error:", err)
 	}
@@ -328,15 +403,30 @@ func runApp() {
 // или запуск под управлением Service Control Manager. Платформо-зависимая
 // часть — в service_windows.go (Windows) и service_other.go (остальные).
 func main() {
-	// У служб Windows рабочая директория по умолчанию — C:\Windows\System32,
-	// а не папка exe. Без этого host_key, frpc.toml, id_rsa и т.д. ищутся
-	// не там. chdir делаем всегда, а не только в режиме службы — так
-	// программа ведёт себя одинаково, откуда бы её ни запустили (двойной
-	// клик, планировщик, служба).
-	if exe, err := os.Executable(); err == nil {
-		if err := os.Chdir(filepath.Dir(exe)); err != nil {
-			log.Printf("не смог перейти в папку программы: %v", err)
+	args := parseArgs(os.Args[1:])
+
+	// Путь до конфига: -c/--config, если дан, иначе — "frpc.toml" рядом с
+	// exe (старое поведение). У служб Windows рабочая директория по
+	// умолчанию — C:\Windows\System32, а не папка exe, так что без явного
+	// chdir host_key/frpc.toml/id_rsa искались бы не там. Переходим в
+	// папку ВЫБРАННОГО конфига (а не обязательно в папку exe) — так с
+	// одного exe можно поднять несколько служб с разными конфигами и
+	// host_key в разных папках, каждая при этом изолирована.
+	configPath := args.Config
+	if configPath == "" {
+		if exe, err := os.Executable(); err == nil {
+			configPath = filepath.Join(filepath.Dir(exe), "frpc.toml")
+		} else {
+			configPath = "frpc.toml"
 		}
 	}
-	runServiceAware(runApp)
+	if abs, err := filepath.Abs(configPath); err == nil {
+		configPath = abs
+	}
+	if err := os.Chdir(filepath.Dir(configPath)); err != nil {
+		log.Printf("не смог перейти в папку конфига (%s): %v", filepath.Dir(configPath), err)
+	}
+	configFileName = filepath.Base(configPath)
+
+	runServiceAware(args, runApp)
 }

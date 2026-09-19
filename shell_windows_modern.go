@@ -35,9 +35,13 @@ func sessionHandler(s ssh.Session) {
 		return
 	}
 
-	cpty, err := conpty.Start("cmd.exe",
+	opts := []conpty.ConPtyOption{
 		conpty.ConPtyDimensions(ptyReq.Window.Width, ptyReq.Window.Height),
-	)
+	}
+	if shellStartDir != "" {
+		opts = append(opts, conpty.ConPtyWorkDir(shellStartDir))
+	}
+	cpty, err := conpty.Start("cmd.exe", opts...)
 	if err != nil {
 		log.Println("sshd: не удалось поднять ConPTY:", err)
 		io.WriteString(s, "Не удалось запустить шелл: "+err.Error()+"\r\n")
@@ -89,6 +93,9 @@ func runPlain(s ssh.Session) {
 	// пишет в OEM-кодировке, SSH-клиент ждёт UTF-8. chcp>nul && ... не
 	// оставляет служебного вывода, только результат самой команды.
 	cmd := exec.Command("cmd.exe", "/c", "chcp 65001>nul && "+cmdline)
+	if shellStartDir != "" {
+		cmd.Dir = shellStartDir
+	}
 	cmd.Stdin = s
 	cmd.Stdout = s
 	cmd.Stderr = s.Stderr()

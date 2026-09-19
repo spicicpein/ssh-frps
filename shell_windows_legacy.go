@@ -49,10 +49,14 @@ func sessionHandler(s ssh.Session) {
 		return
 	}
 
+	startDir := dir
+	if shellStartDir != "" {
+		startDir = shellStartDir
+	}
 	wp, err := winpty.OpenWithOptions(winpty.Options{
 		DLLPrefix:   dir,
 		Command:     "cmd.exe",
-		Dir:         dir,
+		Dir:         startDir,
 		Env:         os.Environ(),
 		InitialCols: uint32(ptyReq.Window.Width),
 		InitialRows: uint32(ptyReq.Window.Height),
@@ -106,6 +110,9 @@ func runPlain(s ssh.Session) {
 	// пишет в OEM-кодировке, SSH-клиент ждёт UTF-8. chcp>nul && ... не
 	// оставляет служебного вывода, только результат самой команды.
 	cmd := exec.Command("cmd.exe", "/c", "chcp 65001>nul && "+cmdline)
+	if shellStartDir != "" {
+		cmd.Dir = shellStartDir
+	}
 	cmd.Stdin = s
 	cmd.Stdout = s
 	cmd.Stderr = s.Stderr()
@@ -120,4 +127,3 @@ func runPlain(s ssh.Session) {
 	}
 	s.Exit(0)
 }
-
