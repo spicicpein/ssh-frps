@@ -13,7 +13,8 @@ import (
 // нет и не нужен — этот файл существует только для того, чтобы я мог
 // собирать и живьём тестировать протокольную часть (авторизация, sftp,
 // туннель) на linux в песочнице. В поставку под Windows этот файл вообще
-// не попадает — сборка идёт из shell_windows.go, см. GOOS=windows.
+// не попадает — сборка идёт из shell_windows_modern.go (или
+// shell_windows_legacy.go для -tags legacy), см. GOOS=windows.
 func sessionHandler(s ssh.Session) {
 	cmd := exec.Command("/bin/sh")
 	cmd.Stdin = s

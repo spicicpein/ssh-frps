@@ -24,25 +24,25 @@ jobs:
           gh release create "${{ github.ref_name }}" \
             winssh-tunnel.exe \
             README.md \
-            QUICKSTART.md \
-            frpc.toml.example \
-            setup.bat \
+            frpc-example.toml \
             --title "winssh-tunnel ${{ github.ref_name }}" \
             --notes "## winssh-tunnel ${{ github.ref_name }}
 
           Полнофункциональный SSH-сервер с FRP-туннелированием для Windows.
 
-          ### Что включено в exe (~9.4 МБ):
-          - ✅ **SSH Server** (gliderlabs/ssh)
+          ### Что включено в exe (~9.5 МБ):
+          - ✅ **SSH Server** (gliderlabs/ssh) с интерактивным шеллом через ConPTY
           - ✅ **SFTP** передача файлов (pkg/sftp)
-          - ✅ **FRP Client** туннель через frp (gofrp/tiny-frpc)
-          - ✅ **ConPTY** интерактивный shell на Windows 10 1809+
+          - ✅ **FRP Client** туннель через frp SSH Tunnel Gateway (gofrp/tiny-frpc)
+          - ✅ Установка как служба Windows (install/uninstall/start/stop)
           - ✅ Монолитный exe, без внешних DLL
 
           ### Быстрый старт:
-          1. Скопируй \`frpc.toml.example\` → \`frpc.toml\`
-          2. Заполни адрес VPS и пароль
+          1. Скопируй \`frpc-example.toml\` → \`frpc.toml\`
+          2. Заполни адрес VPS, токен и пароль (см. комментарии в файле)
           3. Запусти \`winssh-tunnel.exe\`
-          4. Подключайся: \`ssh -p 6000 user@твой.vps.com\`"
+          4. Подключайся: \`ssh -p 65000 user@твой.vps.com\`
+
+          Подробности — в README.md."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

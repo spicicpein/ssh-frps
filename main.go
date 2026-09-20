@@ -299,7 +299,7 @@ func runApp() {
 	go func() {
 		srv := &ssh.Server{
 			Addr:    addr,
-			Handler: sessionHandler, // из shell_windows.go / shell_other.go
+			Handler: sessionHandler, // из shell_windows_modern.go/shell_windows_legacy.go/shell_other.go
 			SubsystemHandlers: map[string]ssh.SubsystemHandler{
 				"sftp": sftpHandler, // из sftp.go
 			},
