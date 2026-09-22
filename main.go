@@ -18,7 +18,6 @@ import (
 
 	"github.com/gliderlabs/ssh"
 	"github.com/gofrp/tiny-frpc/pkg/config"
-	"github.com/gofrp/tiny-frpc/pkg/gssh"
 	toml "github.com/pelletier/go-toml/v2"
 )
 
@@ -170,6 +169,16 @@ func expandWinEnv(s string) string {
 	})
 }
 
+// connectProxyCfg — один прокси-сервер (SOCKS5 или HTTP) для подключения
+// к frps. Задаётся секцией [[connectProxy]] в frpc.toml.
+type connectProxyCfg struct {
+	Type string `toml:"type"` // "socks5" или "http"
+	Addr string `toml:"addr"` // host:port самого прокси-сервера
+	Auth bool   `toml:"auth"` // true — прокси требует логин/пароль
+	User string `toml:"user"`
+	Pass string `toml:"pass"`
+}
+
 type winsshExtra struct {
 	Password string `toml:"winsshPassword"`
 	// ShellDir — папка, в которую попадает пользователь сразу после входа
@@ -177,7 +186,13 @@ type winsshExtra struct {
 	// Пусто = поведение по умолчанию (обычно это папка самой программы,
 	// так исторически ведёт себя cmd.exe без явно указанной директории).
 	ShellDir string `toml:"shellDir"`
-	Proxies  []struct {
+	// ConnectMode — как подключаться к frps: "direct" (по умолчанию,
+	// напрямую, как раньше), "proxy" (только через connectProxy, по
+	// очереди), "auto" (сначала напрямую, при неудаче — через
+	// connectProxy по очереди). См. buildDialerChain в tunnel.go.
+	ConnectMode  string            `toml:"connectMode"`
+	ConnectProxy []connectProxyCfg `toml:"connectProxy"`
+	Proxies      []struct {
 		Name      string `toml:"name"`
 		LocalPort int    `toml:"localPort"`
 		// Winssh отмечает: "это тот самый прокси, чей localPort — это порт
@@ -409,17 +424,10 @@ func runApp() {
 	params := config.ParseFRPCConfigToGoSSHParam(cfg, proxyCfgs, visitorCfgs)
 	log.Printf("proxies to register: %d\n", len(params))
 
+	dialChain := buildDialerChain(extra)
+
 	for _, p := range params {
-		tc, err := gssh.NewTunnelClient(p.LocalAddr, p.ServerAddr, p.SSHExtraCmd)
-		if err != nil {
-			log.Println("new tunnel client error:", err)
-			continue
-		}
-		go func() {
-			if err := tc.Start(); err != nil {
-				log.Println("tunnel start error:", err)
-			}
-		}()
+		go runTunnel(p, dialChain)
 	}
 
 	select {}
