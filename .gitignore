@@ -1,5 +1,7 @@
 # Binaries
 *.dll
+# ...кроме winpty.dll — нужен рядом с winssh-tunnel-legacy.exe (см. BUILD-LEGACY.md)
+!winpty.dll
 *.so
 *.dylib
 

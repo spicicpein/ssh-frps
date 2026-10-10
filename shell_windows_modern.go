@@ -30,8 +30,7 @@ func sessionHandler(s ssh.Session) {
 
 	if !conpty.IsConPtyAvailable() {
 		log.Println("sshd: ConPTY недоступен на этой версии Windows (нужна Windows 10 1809+)")
-		io.WriteString(s, "Эта версия Windows слишком старая для интерактивного шелла (нужен Windows 10 1809+).\r\n")
-		s.Exit(1)
+		failSession(s, "Эта версия Windows слишком старая для интерактивного шелла (нужен Windows 10 1809+ / Server 2019). Для Windows 7/8/Server 2008R2-2016 используй winssh-tunnel-legacy.exe (+ winpty.dll и winpty-agent.exe рядом).\r\n")
 		return
 	}
 
@@ -44,8 +43,7 @@ func sessionHandler(s ssh.Session) {
 	cpty, err := conpty.Start("cmd.exe", opts...)
 	if err != nil {
 		log.Println("sshd: не удалось поднять ConPTY:", err)
-		io.WriteString(s, "Не удалось запустить шелл: "+err.Error()+"\r\n")
-		s.Exit(1)
+		failSession(s, "Не удалось запустить шелл: "+err.Error()+"\r\n")
 		return
 	}
 	defer cpty.Close()

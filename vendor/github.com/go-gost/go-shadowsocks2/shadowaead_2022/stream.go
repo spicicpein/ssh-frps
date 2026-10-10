@@ -1,0 +1,1053 @@
+package shadowaead2022
+
+import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/binary"
+	"errors"
+	"io"
+	"net"
+	"slices"
+	"time"
+
+	"github.com/go-gost/go-shadowsocks2/core"
+	"github.com/go-gost/go-shadowsocks2/socks"
+	"github.com/zeebo/blake3"
+)
+
+// payloadSizeMask is the maximum size of payload in bytes per SIP022.
+const payloadSizeMask = 0xFFFF // 64*1024 - 1
+
+// SIP022 constants
+const (
+	// TimestampTolerance is the maximum allowed timestamp difference (30 seconds)
+	TimestampTolerance = 30 * time.Second
+	// Stream type constants
+	HeaderTypeClientStream = 0
+	HeaderTypeServerStream = 1
+	// Padding constraints
+	MinPaddingLength = 0
+	MaxPaddingLength = 900
+
+	READER_STATE_INIT                = 0 // reader has initialized, but not read any headers
+	READER_STATE_FIXED_LENGTH_HEADER = 1 // reader has read fixed length headers
+	READER_STATE_READY               = 2 // reader has read variable length headers and can receive payload chunks
+
+	WRITER_STATE_INIT  = 0
+	WRITER_STATE_READY = 1
+)
+
+var (
+	ErrRepeatedSalt     = errors.New("repeated salt detected")
+	ErrInvalidTimestamp = errors.New("invalid timestamp")
+	ErrInvalidHeader    = errors.New("invalid header format")
+)
+
+/*
+streamConn contains writer and reader separately for writing and reading data.
+reader and writer has several states for indicating data or headers should be written/read
+
+# For writing of client side:
+
+Before writing payload, the ETH and two request headers should be written, so every write function will check whether
+headers have been sent. Callers should use `InitClient` to initialize variable length header. For fast opening, try `ClientFirstWrite`.
+
+# For reading of client side
+
+Before reading actual payload, the server response header should be read, so every read funtion will check whether
+the response header has been read.
+
+# For writing of server side
+Before writing payload, the response header should be written, so every write function will check whether
+headers have been sent.
+
+# For reading of server side
+
+Before reading actual payload, the EITH and two reuqest headers should be read, so every read funtion will check whether
+the response header has been read. Callers should use `InitServer` to read ETHs and headers.
+*/
+type streamConn struct {
+	net.Conn
+	core.ShadowCipher
+	r                   *reader
+	rState              int
+	w                   *writer
+	wState              int
+	isServer            bool
+	variableHeader      *RequestVariableLengthHeader
+	fixedHeader         *RequestFixedLengthHeader
+	responseFixedHeader *ResponseFixedLengthHeader
+	receivedSalt        []byte                           // Store salt read from peer
+	mySalt              []byte                           // Store our own salt for verification
+	userTable           map[core.EIHHash]core.UserConfig // Extensible Identity Headers, for server
+	clientID            string
+	key                 []byte // key for encryption and decryption
+}
+
+type writer struct {
+	io.Writer
+	cipher.AEAD
+	nonce []byte
+	buf   []byte
+	salt  []byte
+}
+
+// for client: READER_STATE_INIT -> READER_STATE_FIXED_LENGTH_HEADER -> READER_STATE_READY
+// for server: READER_STATE_INIT -> READER_STATE_FIXED_LENGTH_HEADER -> READER_STATE_VARIABLE_LENGTH_HEADER -> READER_STATE_READY
+type reader struct {
+	io.Reader
+	cipher.AEAD
+	nonce    []byte
+	buf      []byte
+	leftover []byte
+	saltSize int
+}
+
+// RequestFixedLengthHeader represents the SIP022 fixed-length header
+type RequestFixedLengthHeader struct {
+	Type      byte   // HeaderTypeClientStream or HeaderTypeServerStream
+	Timestamp int64  // Unix epoch timestamp (8 bytes)
+	Length    uint16 // Next chunk's plaintext length
+}
+
+// RequestVariableLengthHeader represents the SIP022 variable-length header
+type RequestVariableLengthHeader struct {
+	Addr          socks.Addr // Target address (includes type, address, and port)
+	PaddingLength uint16     // Padding length
+	Padding       []byte     // Random padding
+	Payload       []byte     // Initial payload
+}
+
+// ResponseFixedLengthHeader represents the SIP022 response fixed-length header
+type ResponseFixedLengthHeader struct {
+	Type        byte   // HeaderTypeServerStream
+	Timestamp   int64  // Unix epoch timestamp (8 bytes)
+	RequestSalt []byte // 16 or 32 bytes depending on cipher
+	Length      uint16 // Next chunk's plaintext length
+}
+
+// validateTimestamp checks if the timestamp is within the allowed tolerance
+func validateTimestamp(timestamp int64) error {
+	diff := time.Now().Unix() - timestamp
+	if diff < 0 {
+		diff = -diff
+	}
+	if time.Duration(diff)*time.Second > TimestampTolerance {
+		return ErrInvalidTimestamp
+	}
+	return nil
+}
+
+// EncodeFixedLengthHeader encodes a fixed-length header for transmission
+func EncodeFixedLengthHeader(header *RequestFixedLengthHeader) []byte {
+	buf := make([]byte, 11) // 1 + 8 + 2
+	buf[0] = header.Type
+	binary.BigEndian.PutUint64(buf[1:], uint64(header.Timestamp))
+	binary.BigEndian.PutUint16(buf[9:], header.Length)
+	return buf
+}
+
+// EncodeVariableLengthHeader encodes a variable-length header for transmission
+func EncodeVariableLengthHeader(header *RequestVariableLengthHeader) []byte {
+	addrLen := len(header.Addr)
+	totalLen := addrLen + 2 + int(header.PaddingLength) + len(header.Payload)
+	buf := make([]byte, totalLen)
+
+	pos := 0
+	pos += copy(buf[pos:], header.Addr)
+	binary.BigEndian.PutUint16(buf[pos:], header.PaddingLength)
+	pos += 2
+	pos += copy(buf[pos:], header.Padding)
+	copy(buf[pos:], header.Payload)
+
+	return buf
+}
+
+// EncodeResponseFixedLengthHeader encodes a response fixed-length header
+func EncodeResponseFixedLengthHeader(header *ResponseFixedLengthHeader) []byte {
+	buf := make([]byte, 1+8+len(header.RequestSalt)+2)
+	buf[0] = header.Type
+	binary.BigEndian.PutUint64(buf[1:], uint64(header.Timestamp))
+	copy(buf[9:], header.RequestSalt)
+	binary.BigEndian.PutUint16(buf[9+len(header.RequestSalt):], header.Length)
+	return buf
+}
+
+// DecodeFixedLengthHeader decodes a fixed-length header from encrypted data
+func DecodeFixedLengthHeader(data []byte) (*RequestFixedLengthHeader, error) {
+	if len(data) < 11 { // 1+8+2
+		return nil, ErrInvalidHeader
+	}
+
+	return &RequestFixedLengthHeader{
+		Type:      data[0],
+		Timestamp: int64(binary.BigEndian.Uint64(data[1:])),
+		Length:    binary.BigEndian.Uint16(data[9:]),
+	}, validateTimestamp(int64(binary.BigEndian.Uint64(data[1:])))
+}
+
+// DecodeVariableLengthHeader decodes a variable-length header from encrypted data
+func DecodeVariableLengthHeader(data []byte) (*RequestVariableLengthHeader, error) {
+	if len(data) < 7 { // minimum: 1+4+2 for IPv4
+		return nil, ErrInvalidHeader
+	}
+
+	header := &RequestVariableLengthHeader{}
+
+	// Extract SOCKS address
+	addr := socks.SplitAddr(data)
+	if addr == nil {
+		return nil, ErrInvalidHeader
+	}
+	header.Addr = make([]byte, len(addr))
+	copy(header.Addr, addr)
+	pos := len(addr)
+
+	if len(data) < pos+2 {
+		return nil, ErrInvalidHeader
+	}
+
+	// Padding length
+	header.PaddingLength = binary.BigEndian.Uint16(data[pos:])
+	pos += 2
+
+	if header.PaddingLength < MinPaddingLength || header.PaddingLength > MaxPaddingLength {
+		return nil, ErrInvalidHeader
+	}
+
+	if len(data) < pos+int(header.PaddingLength) {
+		return nil, ErrInvalidHeader
+	}
+
+	// Padding and initial payload
+	header.Padding = data[pos : pos+int(header.PaddingLength)]
+	pos += int(header.PaddingLength)
+
+	if pos < len(data) {
+		header.Payload = make([]byte, len(data[pos:]))
+		copy(header.Payload, data[pos:])
+	}
+
+	return header, nil
+}
+
+// DecodeResponseFixedLengthHeader decodes a response fixed-length header
+func DecodeResponseFixedLengthHeader(data []byte, saltSize int) (*ResponseFixedLengthHeader, error) {
+	expectedLen := 1 + 8 + saltSize + 2
+	if len(data) < expectedLen {
+		return nil, ErrInvalidHeader
+	}
+
+	return &ResponseFixedLengthHeader{
+		Type:        data[0],
+		Timestamp:   int64(binary.BigEndian.Uint64(data[1:])),
+		RequestSalt: data[9 : 9+saltSize],
+		Length:      binary.BigEndian.Uint16(data[9+saltSize:]),
+	}, validateTimestamp(int64(binary.BigEndian.Uint64(data[1:])))
+}
+
+// NewWriter wraps an io.Writer with AEAD encryption.
+func NewWriter(w io.Writer, aead cipher.AEAD) io.Writer { return newWriter(w, aead) }
+
+func newWriter(w io.Writer, aead cipher.AEAD) *writer {
+	return &writer{
+		Writer: w,
+		AEAD:   aead,
+		buf:    make([]byte, 2+aead.Overhead()+payloadSizeMask+aead.Overhead()),
+		nonce:  make([]byte, aead.NonceSize()),
+	}
+}
+
+// Write encrypts b and writes to the embedded io.Writer.
+func (w *writer) Write(b []byte) (int, error) {
+	n, err := w.ReadFrom(bytes.NewBuffer(b))
+	return int(n), err
+}
+
+// ReadFrom reads from the given io.Reader until EOF or error, encrypts and
+// writes to the embedded io.Writer. Returns number of bytes read from r and
+// any error encountered.
+func (w *writer) ReadFrom(r io.Reader) (n int64, err error) {
+	for {
+		buf := w.buf
+		payloadBuf := buf[2+w.Overhead() : 2+w.Overhead()+payloadSizeMask]
+		nr, er := r.Read(payloadBuf)
+
+		if nr > 0 {
+			n += int64(nr)
+			if err := w.writeChunk(payloadBuf[:nr]); err != nil {
+				return n, err
+			}
+		}
+
+		if er != nil {
+			if er != io.EOF { // ignore EOF as per io.ReaderFrom contract
+				err = er
+			}
+			break
+		}
+	}
+
+	return n, err
+}
+
+// encryptHeaderChunk encrypts header data without length prefix (SIP022 requirement)
+// Headers are encrypted directly: AEAD(header_data)
+func (w *writer) encryptHeaderChunk(dst, data []byte) ([]byte, error) {
+	if len(data)+w.Overhead() > len(dst) {
+		return nil, errors.New("no enough space for encrypting header chunk")
+	}
+
+	encryptedLen := len(data) + w.Overhead()
+
+	// Directly encrypt header data without length prefix
+	w.Seal(dst[:0], w.nonce, data, nil)
+	core.Increment(w.nonce)
+
+	return dst[:encryptedLen], nil
+}
+
+// encryptPayloadChunk encrypts payload data with length prefix
+// Format: AEAD(length) + AEAD(payload)
+func (w *writer) encryptDataChunk(dst, data []byte) ([]byte, error) {
+	if len(data)+w.Overhead() > len(dst) {
+		return nil, errors.New("no enough space for encrypting data chunk")
+	}
+
+	// Encrypt payload
+	w.Seal(dst[:0], w.nonce, data, nil)
+	core.Increment(w.nonce)
+
+	return dst[:len(data)+w.Overhead()], nil
+}
+
+func (w *writer) encryptLengthChunk(dst []byte, length int) ([]byte, error) {
+	if len(dst) < 2+w.Overhead() {
+		return nil, errors.New("no enough space for encrypting length chunk")
+	}
+	// Encrypt length header (2 bytes, big-endian)
+	dst[0], dst[1] = byte(length>>8), byte(length)
+	w.Seal(dst[:0], w.nonce, dst[:2], nil)
+
+	core.Increment(w.nonce)
+
+	return dst[:2+w.Overhead()], nil
+}
+
+// writeChunk writes an encrypted payload chunk with length prefix
+func (w *writer) writeChunk(data []byte) error {
+	if len(data) > payloadSizeMask {
+		return errors.New("payload too large")
+	}
+
+	payloadLen := 2 + w.Overhead() + len(data) + w.Overhead()
+	buf := w.buf[:payloadLen]
+
+	_, err := w.encryptLengthChunk(buf, len(data))
+	if err != nil {
+		return err
+	}
+
+	_, err = w.encryptDataChunk(buf[2+w.Overhead():], data)
+	if err != nil {
+		return err
+	}
+	_, err = w.Writer.Write(w.buf[:payloadLen])
+	return err
+}
+
+// NewReader wraps an io.Reader with AEAD decryption.
+func NewReader(r io.Reader, aead cipher.AEAD) io.Reader { return newReader(r, aead, 32) } // Default salt size
+
+func newReader(r io.Reader, aead cipher.AEAD, saltSize int) *reader {
+	return &reader{
+		Reader:   r,
+		AEAD:     aead,
+		buf:      make([]byte, payloadSizeMask+aead.Overhead()),
+		nonce:    make([]byte, aead.NonceSize()),
+		saltSize: saltSize,
+	}
+}
+
+// readHeaderChunk reads and decrypts a header chunk (no length prefix)
+func (r *reader) readHeaderChunk(expectedSize int) (int, error) {
+	// Header chunks are encrypted directly without length prefix
+	buf := r.buf[:expectedSize+r.Overhead()]
+	_, err := io.ReadFull(r.Reader, buf)
+	if err != nil {
+		return 0, err
+	}
+
+	// Decrypt header
+	_, err = r.Open(buf[:0], r.nonce, buf, nil)
+	core.Increment(r.nonce)
+	if err != nil {
+		return 0, err
+	}
+
+	return expectedSize, nil
+}
+
+// readPayloadChunk reads and decrypts a payload chunk (with length prefix)
+func (r *reader) readPayloadChunk() (int, error) {
+	// decrypt payload size
+	buf := r.buf[:2+r.Overhead()]
+	_, err := io.ReadFull(r.Reader, buf)
+	if err != nil {
+		return 0, err
+	}
+
+	_, err = r.Open(buf[:0], r.nonce, buf, nil)
+	core.Increment(r.nonce)
+	if err != nil {
+		return 0, err
+	}
+
+	size := (int(buf[0])<<8 + int(buf[1])) & payloadSizeMask
+
+	// decrypt payload
+	buf = r.buf[:size+r.Overhead()]
+	_, err = io.ReadFull(r.Reader, buf)
+	if err != nil {
+		return 0, err
+	}
+
+	_, err = r.Open(buf[:0], r.nonce, buf, nil)
+	core.Increment(r.nonce)
+	if err != nil {
+		return 0, err
+	}
+
+	return size, nil
+}
+
+// Read reads from the embedded io.Reader, decrypts and writes to b.
+func (r *reader) Read(b []byte) (int, error) {
+	// copy decrypted bytes (if any) from previous record first
+	if len(r.leftover) > 0 {
+		n := copy(b, r.leftover)
+		r.leftover = r.leftover[n:]
+		return n, nil
+	}
+
+	for {
+		n, err := r.readPayloadChunk()
+		if err != nil {
+			return 0, err
+		}
+
+		// If n == 0, it means we read a header chunk, continue to next chunk
+		if n == 0 {
+			continue
+		}
+
+		m := copy(b, r.buf[:n])
+		if m < n { // insufficient len(b), keep leftover for next read
+			r.leftover = r.buf[m:n]
+		}
+		return m, nil
+	}
+}
+
+// WriteTo reads from the embedded io.Reader, decrypts and writes to w until
+// there's no more data to write or when an error occurs. Return number of
+// bytes written to w and any error encountered.
+func (r *reader) WriteTo(w io.Writer) (n int64, err error) {
+	// write decrypted bytes left over from previous record
+	for len(r.leftover) > 0 {
+		nw, ew := w.Write(r.leftover)
+		r.leftover = r.leftover[nw:]
+		n += int64(nw)
+		if ew != nil {
+			return n, ew
+		}
+	}
+
+	for {
+		nr, er := r.readPayloadChunk()
+		if er != nil {
+			if er != io.EOF { // ignore EOF as per io.Copy contract (using src.WriteTo shortcut)
+				err = er
+			}
+			break
+		}
+
+		// Skip header chunks (nr == 0)
+		if nr > 0 {
+			nw, ew := w.Write(r.buf[:nr])
+			n += int64(nw)
+
+			if ew != nil {
+				err = ew
+				break
+			}
+		}
+	}
+
+	return n, err
+}
+
+func (c *streamConn) loadSalt() error {
+	salt := make([]byte, c.SaltSize())
+	if _, err := io.ReadFull(c.Conn, salt); err != nil {
+		return err
+	}
+
+	// Store salt read from peer at connection level (always safe)
+	c.receivedSalt = make([]byte, len(salt))
+	copy(c.receivedSalt, salt)
+
+	return nil
+}
+
+func (c *streamConn) readFixedLengthHeader() error {
+	size, err := c.r.readHeaderChunk(11)
+	if err != nil {
+		return err
+	}
+	fixedHeader, err := DecodeFixedLengthHeader(c.r.buf[:size])
+	if err != nil {
+		return err
+	}
+
+	c.fixedHeader = fixedHeader
+	err = c.validateFixedLengthHeaders()
+	if err != nil {
+		return err
+	}
+	c.rState = READER_STATE_FIXED_LENGTH_HEADER
+
+	return nil
+}
+
+func (c *streamConn) readResponseFixedLengthHeader() error {
+	size, err := c.r.readHeaderChunk(1 + 8 + 2 + len(c.receivedSalt))
+	if err != nil {
+		return err
+	}
+
+	rFixedHeader, err := DecodeResponseFixedLengthHeader(c.r.buf[:size], len(c.receivedSalt))
+	if err != nil {
+		return err
+	}
+
+	c.responseFixedHeader = rFixedHeader
+	err = c.validateResponseFixedLengthHeaders()
+	if err != nil {
+		return err
+	}
+
+	if rFixedHeader.Length > 0 {
+		if _, err := c.r.readHeaderChunk(int(rFixedHeader.Length)); err != nil {
+			return err
+		}
+
+		c.r.leftover = append(c.r.leftover, c.r.buf[:rFixedHeader.Length]...)
+	}
+
+	c.rState = READER_STATE_READY
+	return nil
+}
+
+func (c *streamConn) readVariableLengthHeader() error {
+	if c.rState != READER_STATE_FIXED_LENGTH_HEADER {
+		return errors.New("fixed length header must be read before variable length header")
+	}
+
+	// Variable header size is specified in fixed header's Length field
+	size, err := c.r.readHeaderChunk(int(c.fixedHeader.Length))
+	if err != nil {
+		return err
+	}
+	variableHeader, err := DecodeVariableLengthHeader(c.r.buf[:size])
+	if err != nil {
+		return err
+	}
+
+	c.variableHeader = variableHeader
+	err = c.validateVariableLengthHeaders()
+	if err != nil {
+		return err
+	}
+	c.rState = READER_STATE_READY
+
+	// If there's initial payload in the header, return it
+	if len(variableHeader.Payload) > 0 {
+		c.r.leftover = append(c.r.leftover, variableHeader.Payload...)
+	}
+
+	return nil
+}
+
+func (c *streamConn) readHeaders() error {
+	if c.rState == READER_STATE_INIT {
+		if c.isServer {
+			err := c.readFixedLengthHeader()
+			if err != nil {
+				return err
+			}
+		} else {
+			err := c.readResponseFixedLengthHeader()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if c.rState == READER_STATE_FIXED_LENGTH_HEADER {
+		err := c.readVariableLengthHeader()
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// sendClientHeaders sends salt + EIH + fixed header + variable header for client connections
+func (c *streamConn) sendClientHeaders(initialPayload []byte) error {
+	if len(initialPayload) == 0 {
+		var length int
+		if MaxPaddingLength > 0 {
+			b := make([]byte, 2)
+			rand.Read(b)
+			length = int(binary.BigEndian.Uint16(b)) % MaxPaddingLength
+		}
+		padding := make([]byte, length)
+		n, err := rand.Read(padding)
+
+		if err != nil {
+			return err
+		}
+		c.variableHeader.Padding = padding
+		c.variableHeader.PaddingLength = uint16(n)
+	} else {
+		c.variableHeader.PaddingLength = 0
+		c.variableHeader.Padding = nil
+		c.variableHeader.Payload = initialPayload
+	}
+	// Encode variable-length header first to get its size
+	variableHeaderData := EncodeVariableLengthHeader(c.variableHeader)
+
+	// Create fixed-length header automatically
+	c.fixedHeader = &RequestFixedLengthHeader{
+		Type:      HeaderTypeClientStream,
+		Timestamp: time.Now().Unix(),
+		Length:    uint16(len(variableHeaderData)),
+	}
+
+	// Encode fixed-length header
+	fixedHeaderData := EncodeFixedLengthHeader(c.fixedHeader)
+
+	additionalHeaders, err := c.AdditionalHeaders(c.w.salt)
+	if err != nil {
+		return err
+	}
+
+	// Combine salt + encrypted header chunks into one buffer
+	totalLen := len(c.w.salt) + len(additionalHeaders) + len(fixedHeaderData) + c.w.Overhead() + len(variableHeaderData) + c.w.Overhead()
+	combinedBuf := make([]byte, totalLen)
+	pos := 0
+
+	// Copy salt
+	copy(combinedBuf[0:], c.w.salt)
+	pos += len(c.w.salt)
+
+	// copy EIH
+	copy(combinedBuf[pos:], additionalHeaders)
+	pos += len(additionalHeaders)
+
+	// Encrypt both headers WITHOUT length prefix (SIP022 requirement)
+	fixedHeaderChunk, err := c.w.encryptHeaderChunk(combinedBuf[pos:], fixedHeaderData)
+	if err != nil {
+		return err
+	}
+	pos += len(fixedHeaderChunk)
+
+	_, err = c.w.encryptHeaderChunk(combinedBuf[pos:], variableHeaderData)
+	if err != nil {
+		return err
+	}
+
+	// Send everything in one write call (SIP022 requirement)
+	_, err = c.w.Writer.Write(combinedBuf)
+	if err == nil {
+		c.wState = WRITER_STATE_READY
+	}
+	return err
+}
+
+// sendServerHeader sends salt + response header for server connections
+func (c *streamConn) sendServerHeader(initialPayload []byte) error {
+	// For server, we need the client's salt to include in response
+	if len(c.receivedSalt) == 0 {
+		return errors.New("client salt not set for server response")
+	}
+
+	// Create response header
+	responseHeader := &ResponseFixedLengthHeader{
+		Type:        HeaderTypeServerStream,
+		Timestamp:   time.Now().Unix(),
+		RequestSalt: c.receivedSalt,
+		Length:      uint16(len(initialPayload)), // First response chunk has no payload
+	}
+
+	// Encode response header
+	responseHeaderData := EncodeResponseFixedLengthHeader(responseHeader)
+
+	// Combine salt + encrypted header chunk
+	headerLen := len(c.w.salt) + len(responseHeaderData) + c.w.Overhead()
+	payloadLen := len(initialPayload) + c.w.Overhead()
+	combinedBuf := make([]byte, headerLen+payloadLen)
+	pos := 0
+
+	// Copy salt
+	copy(combinedBuf[pos:], c.w.salt)
+	pos += len(c.w.salt)
+
+	// Encrypt header WITHOUT length prefix (SIP022 requirement)
+	headerChunk, err := c.w.encryptHeaderChunk(combinedBuf[pos:], responseHeaderData)
+	if err != nil {
+		return err
+	}
+	pos += len(headerChunk)
+
+	_, err = c.w.encryptDataChunk(combinedBuf[pos:], initialPayload)
+	if err != nil {
+		return err
+	}
+
+	// Send everything in one write call
+	_, err = c.w.Writer.Write(combinedBuf)
+	if err == nil {
+		c.wState = WRITER_STATE_READY
+	}
+
+	return err
+}
+
+func (c *streamConn) sendHeaders(initialPayload []byte) error {
+	if c.wState == WRITER_STATE_READY {
+		return nil
+	}
+
+	if c.isServer {
+		return c.sendServerHeader(initialPayload)
+	} else {
+		return c.sendClientHeaders(initialPayload)
+	}
+}
+
+func (c *streamConn) initReader() error {
+	if len(c.receivedSalt) == 0 {
+		err := c.loadSalt()
+		if err != nil {
+			return err
+		}
+	}
+
+	aead, err := c.Decrypter(c.key, c.receivedSalt)
+	if err != nil {
+		return err
+	}
+
+	c.r = newReader(c.Conn, aead, c.SaltSize())
+	c.rState = READER_STATE_INIT
+
+	return nil
+}
+
+func (c *streamConn) Read(b []byte) (int, error) {
+	if c.r == nil {
+		if err := c.initReader(); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := c.readHeaders(); err != nil {
+		return 0, err
+	}
+	if c.rState != READER_STATE_READY {
+		return 0, errors.New("reader not ready")
+	}
+	return c.r.Read(b)
+}
+
+func (c *streamConn) WriteTo(w io.Writer) (int64, error) {
+	if c.r == nil {
+		if err := c.initReader(); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := c.readHeaders(); err != nil {
+		return 0, err
+	}
+	if c.rState != READER_STATE_READY {
+		return 0, errors.New("reader not ready")
+	}
+	return c.r.WriteTo(w)
+}
+
+// SetVariableHeader sets the variable header for the connection
+// Fixed header will be generated automatically when needed
+func (c *streamConn) SetVariableHeader(variable *RequestVariableLengthHeader) error {
+	c.variableHeader = variable
+	return nil
+}
+
+func (c *streamConn) validateFixedLengthHeaders() error {
+	if c.fixedHeader == nil {
+		return errors.New("no header received")
+	}
+
+	return validateTimestamp(c.fixedHeader.Timestamp)
+}
+
+func (c *streamConn) validateResponseFixedLengthHeaders() error {
+	if c.responseFixedHeader == nil {
+		return errors.New("no header received")
+	}
+
+	if !slices.Equal(c.mySalt, c.responseFixedHeader.RequestSalt) {
+		return errors.New("salt doesn't match")
+	}
+
+	return nil
+}
+
+func (c *streamConn) validateVariableLengthHeaders() error {
+	if c.variableHeader == nil {
+		return errors.New("no header received")
+	}
+
+	if c.variableHeader.PaddingLength == 0 && len(c.variableHeader.Payload) == 0 {
+		return errors.New("one of padding and initial payload must be set")
+	}
+
+	return nil
+}
+
+// InitServer will read salt + Extensible Identity Headers + fixed length header + variable length header from first packet of connection
+// Btw, header validating also be applied
+func (c *streamConn) InitServer() error {
+	var err error
+
+	if !c.isServer {
+		return nil
+	}
+
+	err = c.loadSalt()
+	if err != nil {
+		return err
+	}
+
+	// validate Extensible Identity Headers
+	if c.IsMultiUser() {
+		subkey := make([]byte, c.KeySize())
+		userPskHash := make([]byte, 16)
+		if _, err = io.ReadFull(c.Conn, userPskHash); err != nil {
+			return err
+		}
+
+		blake3.DeriveKey("shadowsocks 2022 identity subkey", append(c.Key(), c.receivedSalt...), subkey)
+		var aesCipher cipher.Block
+		aesCipher, err = aes.NewCipher(subkey)
+		if err != nil {
+			return err
+		}
+
+		aesCipher.Decrypt(userPskHash, userPskHash)
+		if u, ok := c.userTable[core.EIHHash(userPskHash)]; !ok {
+			return errors.New("no such user")
+		} else {
+			var k []byte
+			k, err = core.Base64Decode(u.Password)
+			if err != nil {
+				return err
+			}
+			c.key = k
+			c.clientID = u.Name
+		}
+	}
+
+	if c.r == nil {
+		if err = c.initReader(); err != nil {
+			return err
+		}
+	}
+
+	if c.rState == READER_STATE_INIT {
+		if !CheckSalt(c.receivedSalt) {
+			err = ErrRepeatedSalt
+			return err
+		}
+
+		err = c.readHeaders()
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *streamConn) InitClient(target socks.Addr) error {
+	if c.isServer {
+		return nil
+	}
+
+	c.variableHeader = &RequestVariableLengthHeader{
+		Addr: target,
+	}
+
+	return nil
+}
+
+func (c *streamConn) initWriter() error {
+	salt := make([]byte, c.SaltSize())
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return err
+	}
+	aead, err := c.Encrypter(c.key, salt)
+	if err != nil {
+		return err
+	}
+
+	c.mySalt = salt
+	c.w = newWriter(c.Conn, aead)
+	c.w.salt = salt
+	c.wState = WRITER_STATE_INIT
+
+	return nil
+}
+
+func (c *streamConn) Write(b []byte) (int, error) {
+	if c.w == nil {
+		if err := c.initWriter(); err != nil {
+			return 0, err
+		}
+	}
+
+	if c.wState == WRITER_STATE_INIT {
+		// Limit initial payload to avoid uint16 overflow in fixed header Length field
+		maxInitial := 16384
+		if len(b) > maxInitial {
+			if err := c.sendHeaders(b[:maxInitial]); err != nil {
+				return 0, err
+			}
+			n, err := c.w.Write(b[maxInitial:])
+			return n + maxInitial, err
+		} else {
+			if err := c.sendHeaders(b); err != nil {
+				return 0, err
+			}
+			return len(b), nil
+		}
+	}
+
+	if c.wState != WRITER_STATE_READY {
+		return 0, errors.New("writer is not ready")
+	}
+	return c.w.Write(b)
+}
+
+func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
+	if c.w == nil {
+		if err := c.initWriter(); err != nil {
+			return 0, err
+		}
+	}
+
+	var totalRead int64
+
+	if c.wState == WRITER_STATE_INIT {
+		buf := make([]byte, payloadSizeMask-32-43-c.w.Overhead())
+		nr, err := r.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				if errHeaders := c.sendHeaders(nil); errHeaders != nil {
+					return 0, errHeaders
+				}
+				return 0, nil
+			}
+			return 0, err
+		}
+		if err := c.sendHeaders(buf[:nr]); err != nil {
+			return 0, err
+		}
+		totalRead += int64(nr)
+	}
+
+	if c.wState != WRITER_STATE_READY {
+		return totalRead, errors.New("writer is not ready")
+	}
+	n, err := c.w.ReadFrom(r)
+	return totalRead + n, err
+}
+
+// Generate Extensible Identity Headers
+func (c *streamConn) AdditionalHeaders(salt []byte) ([]byte, error) {
+	psks := c.Keys()
+	n := len(psks)
+	r := []byte{}
+	subkey := make([]byte, c.KeySize())
+	for i := range n - 1 {
+		key := psks[i]
+		nextKey := psks[i+1]
+		blake3.DeriveKey("shadowsocks 2022 identity subkey", append(key, salt...), subkey)
+		nextKeyHash := blake3.Sum256(nextKey)
+		buf := nextKeyHash[:16]
+		c, err := aes.NewCipher(subkey)
+		if err != nil {
+			return nil, err
+		}
+
+		c.Encrypt(buf, buf)
+		r = append(r, buf...)
+	}
+
+	return r, nil
+}
+
+func (c *streamConn) Target() socks.Addr {
+	if c.variableHeader == nil {
+		return nil
+	}
+	return c.variableHeader.Addr
+}
+
+func (c *streamConn) IsMultiUser() bool {
+	return c.userTable != nil
+}
+
+func (c *streamConn) ClientID() string {
+	return c.clientID
+}
+
+// for fast open, send headers
+func (c *streamConn) ClientFirstWrite() error {
+	if c.w == nil {
+		if err := c.initWriter(); err != nil {
+			return err
+		}
+	}
+
+	if c.wState == WRITER_STATE_INIT {
+		err := c.sendClientHeaders(nil)
+		if err != nil {
+			return err
+		}
+		c.wState = WRITER_STATE_READY
+	}
+
+	return nil
+}
+
+// NewConn wraps a stream-oriented net.Conn with cipher.
+func NewConn(c net.Conn, ciph core.ShadowCipher, users []core.UserConfig, role int) core.TCPConn {
+	table := core.UsersToEIHHash(users)
+
+	return &streamConn{Conn: c, userTable: table, key: ciph.Key(), ShadowCipher: ciph, isServer: role == core.ROLE_SERVER}
+}

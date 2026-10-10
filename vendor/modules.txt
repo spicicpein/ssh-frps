@@ -1,0 +1,87 @@
+# github.com/UserExistsError/conpty v0.1.4
+## explicit; go 1.17
+github.com/UserExistsError/conpty
+# github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be
+## explicit
+github.com/anmitsu/go-shlex
+# github.com/gliderlabs/ssh v0.3.8
+## explicit; go 1.21
+github.com/gliderlabs/ssh
+# github.com/go-gost/go-shadowsocks2 v0.1.4
+## explicit; go 1.23
+github.com/go-gost/go-shadowsocks2/core
+github.com/go-gost/go-shadowsocks2/shadowaead
+github.com/go-gost/go-shadowsocks2/shadowaead_2022
+github.com/go-gost/go-shadowsocks2/socks
+github.com/go-gost/go-shadowsocks2/utils
+# github.com/gofrp/tiny-frpc v0.1.3
+## explicit; go 1.21
+github.com/gofrp/tiny-frpc/pkg/config
+github.com/gofrp/tiny-frpc/pkg/config/v1
+github.com/gofrp/tiny-frpc/pkg/gssh
+github.com/gofrp/tiny-frpc/pkg/util
+github.com/gofrp/tiny-frpc/pkg/util/log
+# github.com/iamacarpet/go-winpty v1.0.4
+## explicit; go 1.18
+github.com/iamacarpet/go-winpty
+# github.com/kr/fs v0.1.0
+## explicit
+github.com/kr/fs
+# github.com/pelletier/go-toml/v2 v2.4.3
+## explicit; go 1.21
+github.com/pelletier/go-toml/v2
+github.com/pelletier/go-toml/v2/internal/characters
+github.com/pelletier/go-toml/v2/internal/danger
+github.com/pelletier/go-toml/v2/internal/parserbridge
+github.com/pelletier/go-toml/v2/internal/tracker
+github.com/pelletier/go-toml/v2/unstable
+# github.com/pkg/sftp v1.13.7
+## explicit; go 1.18
+github.com/pkg/sftp
+github.com/pkg/sftp/internal/encoding/ssh/filexfer
+github.com/pkg/sftp/internal/encoding/ssh/filexfer/openssh
+# github.com/riobard/go-bloom v0.0.0-20200614022211-cdc8013cb5b3
+## explicit
+github.com/riobard/go-bloom
+# github.com/zeebo/assert v1.1.0
+## explicit
+github.com/zeebo/assert
+# github.com/zeebo/blake3 v0.2.4
+## explicit; go 1.20
+github.com/zeebo/blake3
+github.com/zeebo/blake3/internal/alg
+github.com/zeebo/blake3/internal/alg/compress
+github.com/zeebo/blake3/internal/alg/compress/compress_avx512
+github.com/zeebo/blake3/internal/alg/compress/compress_pure
+github.com/zeebo/blake3/internal/alg/compress/compress_sse41
+github.com/zeebo/blake3/internal/alg/hash
+github.com/zeebo/blake3/internal/alg/hash/hash_avx2
+github.com/zeebo/blake3/internal/alg/hash/hash_avx512
+github.com/zeebo/blake3/internal/alg/hash/hash_neon
+github.com/zeebo/blake3/internal/alg/hash/hash_pure
+github.com/zeebo/blake3/internal/alg/hash/hash_sve2
+github.com/zeebo/blake3/internal/consts
+github.com/zeebo/blake3/internal/utils
+# github.com/zeebo/pcg v1.0.1
+## explicit
+github.com/zeebo/pcg
+# golang.org/x/crypto v0.17.0
+## explicit; go 1.20
+golang.org/x/crypto/blowfish
+golang.org/x/crypto/chacha20
+golang.org/x/crypto/chacha20poly1305
+golang.org/x/crypto/curve25519
+golang.org/x/crypto/hkdf
+golang.org/x/crypto/internal/alias
+golang.org/x/crypto/internal/poly1305
+golang.org/x/crypto/ssh
+golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
+golang.org/x/crypto/ssh/knownhosts
+# golang.org/x/sys v0.32.0
+## explicit; go 1.20
+golang.org/x/sys/cpu
+golang.org/x/sys/windows
+golang.org/x/sys/windows/registry
+golang.org/x/sys/windows/svc
+golang.org/x/sys/windows/svc/eventlog
+golang.org/x/sys/windows/svc/mgr

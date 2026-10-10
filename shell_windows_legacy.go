@@ -9,9 +9,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gliderlabs/ssh"
 	"github.com/iamacarpet/go-winpty"
+	"golang.org/x/sys/windows"
 )
 
 // dllDir — папка, где лежат winpty.dll и winpty-agent.exe. Ищем рядом с самим
@@ -44,8 +46,7 @@ func sessionHandler(s ssh.Session) {
 	dir := dllDir()
 	if _, err := os.Stat(filepath.Join(dir, "winpty.dll")); err != nil {
 		log.Println("sshd: winpty.dll не найден рядом с программой:", err)
-		io.WriteString(s, "Не найден winpty.dll рядом с программой — интерактивный шелл недоступен.\r\n")
-		s.Exit(1)
+		failSession(s, "Не найден winpty.dll рядом с программой — интерактивный шелл недоступен.\r\n")
 		return
 	}
 
@@ -63,8 +64,7 @@ func sessionHandler(s ssh.Session) {
 	})
 	if err != nil {
 		log.Println("sshd: не удалось поднять winpty:", err)
-		io.WriteString(s, "Не удалось запустить шелл: "+err.Error()+"\r\n")
-		s.Exit(1)
+		failSession(s, "Не удалось запустить шелл: "+err.Error()+"\r\n")
 		return
 	}
 	defer wp.Close()
@@ -79,8 +79,13 @@ func sessionHandler(s ssh.Session) {
 
 	// ssh-клиент -> cmd.exe
 	go io.Copy(wp.StdIn, s)
-	// cmd.exe -> ssh-клиент
-	go io.Copy(s, wp.StdOut)
+	// cmd.exe -> ssh-клиент. Канал outDone нужен, чтобы после завершения
+	// процесса дочитать хвост вывода, а не обрезать его раньше времени.
+	outDone := make(chan struct{})
+	go func() {
+		io.Copy(s, wp.StdOut)
+		close(outDone)
+	}()
 
 	go func() {
 		for win := range winCh {
@@ -88,13 +93,26 @@ func sessionHandler(s ssh.Session) {
 		}
 	}()
 
-	// у go-winpty нет удобного Wait() с кодом завершения — просто держим
-	// сессию, пока процесс жив, ориентируясь на процесс-хендл.
-	proc, err := os.FindProcess(int(wp.GetProcHandle()))
-	if err == nil {
-		proc.Wait()
+	// Ждём завершения cmd.exe по его HANDLE. Раньше тут было
+	// os.FindProcess(int(handle)), но FindProcess принимает PID, а не
+	// HANDLE — это разные числа. Вызов падал с ошибкой (либо находил чужой
+	// процесс), Wait() пропускался, и сессия закрывалась сразу после ввода
+	// пароля.
+	code := uint32(0)
+	h := windows.Handle(wp.GetProcHandle())
+	if ev, err := windows.WaitForSingleObject(h, windows.INFINITE); err != nil || ev != windows.WAIT_OBJECT_0 {
+		log.Printf("sshd: не удалось дождаться завершения шелла (event=%d): %v", ev, err)
+	} else if err := windows.GetExitCodeProcess(h, &code); err != nil {
+		log.Println("sshd: не удалось получить код завершения шелла:", err)
 	}
-	s.Exit(0)
+
+	// Дочитываем остаток вывода (winpty-agent закроет pipe после выхода
+	// процесса), но не вечно — на случай зависшего агента.
+	select {
+	case <-outDone:
+	case <-time.After(2 * time.Second):
+	}
+	s.Exit(int(code))
 }
 
 // runPlain — то же самое, что в современной версии: выполнение одной

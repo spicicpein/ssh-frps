@@ -1,0 +1,1 @@
+Please refer to [CHANGELOG.md](https://github.com/gofrp/tiny-frpc/blob/main/CHANGELOG.md) for details.

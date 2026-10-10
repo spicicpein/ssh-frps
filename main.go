@@ -192,7 +192,21 @@ type winsshExtra struct {
 	// connectProxy по очереди). См. buildDialerChain в tunnel.go.
 	ConnectMode  string            `toml:"connectMode"`
 	ConnectProxy []connectProxyCfg `toml:"connectProxy"`
-	Proxies      []struct {
+
+	// Egress: winssh-tunnel сам становится точкой выхода в интернет —
+	// SOCKS5/HTTP и/или Shadowsocks сервер, доступный снаружи через
+	// собственный [[proxies]] (флаги egressSocks/egressShadowsocks ниже).
+	// См. egress.go.
+	EgressSocksAuth bool   `toml:"egressSocksAuth"`
+	EgressSocksUser string `toml:"egressSocksUser"`
+	EgressSocksPass string `toml:"egressSocksPass"`
+
+	// EgressShadowsocksMethod — один из: aes-256-gcm (по умолчанию,
+	// обязателен), aes-128-gcm, chacha20-ietf-poly1305. Пусто = aes-256-gcm.
+	EgressShadowsocksMethod   string `toml:"egressShadowsocksMethod"`
+	EgressShadowsocksPassword string `toml:"egressShadowsocksPassword"`
+
+	Proxies []struct {
 		Name      string `toml:"name"`
 		LocalPort int    `toml:"localPort"`
 		// Winssh отмечает: "это тот самый прокси, чей localPort — это порт
@@ -201,6 +215,11 @@ type winsshExtra struct {
 		// localPort по отдельности). Теперь единственный источник
 		// правды — localPort у ЭТОГО прокси.
 		Winssh bool `toml:"winssh"`
+		// EgressSocks/EgressShadowsocks — та же идея, что и Winssh выше,
+		// но для egress-серверов (см. комментарий над EgressSocksAuth).
+		// Каждый — отдельный [[proxies]], на отдельном localPort/remotePort.
+		EgressSocks       bool `toml:"egressSocks"`
+		EgressShadowsocks bool `toml:"egressShadowsocks"`
 	} `toml:"proxies"`
 }
 
@@ -254,6 +273,30 @@ func sshdPort(e winsshExtra) int {
 		}
 	}
 	return 2222
+}
+
+// egressSocksPort/egressShadowsocksPort — та же идея, что sshdPort выше,
+// но для egress-серверов: ищут прокси с соответствующим флагом и
+// возвращают его localPort. Возвращают 0, если такого прокси нет — это
+// означает "этот egress-сервер не включён", в отличие от sshdPort, у
+// которого всегда есть дефолт (sshd — обязательная часть программы,
+// egress-серверы — опциональные).
+func egressSocksPort(e winsshExtra) int {
+	for _, p := range e.Proxies {
+		if p.EgressSocks && p.LocalPort != 0 {
+			return p.LocalPort
+		}
+	}
+	return 0
+}
+
+func egressShadowsocksPort(e winsshExtra) int {
+	for _, p := range e.Proxies {
+		if p.EgressShadowsocks && p.LocalPort != 0 {
+			return p.LocalPort
+		}
+	}
+	return 0
 }
 
 // простой троттлинг перебора: чем больше подряд неудачных попыток с одного IP,
@@ -428,6 +471,13 @@ func runApp() {
 
 	for _, p := range params {
 		go runTunnel(p, dialChain)
+	}
+
+	if port := egressSocksPort(extra); port != 0 {
+		go startEgressSocksServer(port, extra.EgressSocksAuth, extra.EgressSocksUser, extra.EgressSocksPass)
+	}
+	if port := egressShadowsocksPort(extra); port != 0 {
+		go startEgressShadowsocksServer(port, extra.EgressShadowsocksMethod, extra.EgressShadowsocksPassword)
 	}
 
 	select {}
