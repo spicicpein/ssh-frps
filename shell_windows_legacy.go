@@ -54,6 +54,12 @@ func sessionHandler(s ssh.Session) {
 	if shellStartDir != "" {
 		startDir = shellStartDir
 	}
+	if st, err := os.Stat(startDir); err != nil || !st.IsDir() {
+		log.Printf("sshd: стартовая папка шелла недоступна: %q (%v)", startDir, err)
+		failSession(s, "Стартовая папка шелла не существует: "+startDir+"\r\nПроверь shellDir в frpc.toml.\r\n")
+		return
+	}
+	log.Printf("sshd: запускаю cmd.exe через winpty, папка %q", startDir)
 	wp, err := winpty.OpenWithOptions(winpty.Options{
 		DLLPrefix:   dir,
 		Command:     "cmd.exe",

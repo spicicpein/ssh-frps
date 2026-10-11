@@ -115,20 +115,30 @@ func OpenWithOptions(options Options) (*WinPTY, error) {
 		return nil, err
 	}
 
+	// PATCH(winssh-tunnel): оригинал передавал в winpty_spawn нулевые указатели
+	// вместо буферов для кода ошибки CreateProcess и текста ошибки winpty, из-за
+	// чего вся диагностика терялась ("Error spawning process..." без причины), а
+	// при неудаче ещё и оставался висеть winpty-agent.exe.
 	var (
-		spawnErr  uintptr
-		lastError *uint32
+		spawnErr   uintptr // winpty_error_ptr_t, заполняется самим winpty
+		createProc uint32  // код GetLastError() от CreateProcess внутри агента
 	)
-	spawnRet, _, _ := winpty_spawn.Call(wp, spawnCfg, uintptr(unsafe.Pointer(&obj.childHandle)), uintptr(0), uintptr(unsafe.Pointer(lastError)), uintptr(unsafe.Pointer(spawnErr)))
+	spawnRet, _, _ := winpty_spawn.Call(wp, spawnCfg, uintptr(unsafe.Pointer(&obj.childHandle)), uintptr(0), uintptr(unsafe.Pointer(&createProc)), uintptr(unsafe.Pointer(&spawnErr)))
 	winpty_spawn_config_free.Call(spawnCfg)
-	defer winpty_error_free.Call(spawnErr)
 
 	if spawnRet == 0 {
-		return nil, fmt.Errorf("Error spawning process...")
-	} else {
-		obj.wp = wp
-		return obj, nil
+		msg := "нет текста ошибки"
+		if spawnErr != 0 {
+			msg = GetErrorMessage(spawnErr)
+			winpty_error_free.Call(spawnErr)
+		}
+		winpty_free.Call(wp)
+		obj.StdIn.Close()
+		obj.StdOut.Close()
+		return nil, fmt.Errorf("Error spawning process: %s (код CreateProcess: %d, cmd=%q, dir=%q)", msg, createProc, options.Command, options.Dir)
 	}
+	obj.wp = wp
+	return obj, nil
 }
 
 func (obj *WinPTY) SetSize(ws_col, ws_row uint32) {
