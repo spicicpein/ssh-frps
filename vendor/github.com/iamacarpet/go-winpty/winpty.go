@@ -166,3 +166,14 @@ func (obj *WinPTY) Close() {
 func (obj *WinPTY) GetProcHandle() uintptr {
 	return obj.childHandle
 }
+
+// PATCH(winssh-tunnel): отдаёт наружу хендл процесса winpty-agent.exe (в
+// оригинале winpty_agent_process объявлен, но недоступен). Хендл принадлежит
+// самому winpty — закрывать его не нужно, он живёт до Close().
+func (obj *WinPTY) AgentProcessHandle() uintptr {
+	if obj.closed || obj.wp == 0 {
+		return 0
+	}
+	h, _, _ := winpty_agent_process.Call(obj.wp)
+	return h
+}

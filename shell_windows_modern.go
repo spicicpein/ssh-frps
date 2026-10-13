@@ -48,6 +48,13 @@ func sessionHandler(s ssh.Session) {
 	}
 	defer cpty.Close()
 
+	// Все процессы сессии — в Job Object с KILL_ON_JOB_CLOSE: после выхода из
+	// функции (выход из шелла, закрытие окна клиента, обрыв связи) в системе
+	// не остаётся ни cmd.exe, ни того, что из него запускали.
+	job := newKillJob()
+	defer job.kill()
+	job.addPid(uint32(cpty.Pid()), "cmd.exe")
+
 	// cmd.exe по умолчанию пишет в OEM-кодировке консоли (обычно CP866 на
 	// русской Windows), а SSH-клиенты (PuTTY/KiTTY и т.д.) чаще всего ждут
 	// UTF-8 — отсюда кракозябры на кириллице. Переключаем кодовую страницу
@@ -58,8 +65,16 @@ func sessionHandler(s ssh.Session) {
 	// приглашение, вывод команд, реальный ввод — уже корректный UTF-8.
 	_, _ = cpty.Write([]byte("chcp 65001>nul\r\n"))
 
+	// Контекст сессии отменяется при обрыве соединения; плюс отменяем сами,
+	// если клиент закрыл ввод (закрыл канал, не закрывая соединение).
+	ctx, cancel := context.WithCancel(s.Context())
+	defer cancel()
+
 	// ssh-клиент -> cmd.exe
-	go io.Copy(cpty, s)
+	go func() {
+		io.Copy(cpty, s)
+		cancel()
+	}()
 	// cmd.exe -> ssh-клиент
 	go io.Copy(s, cpty)
 
@@ -70,7 +85,13 @@ func sessionHandler(s ssh.Session) {
 		}
 	}()
 
-	code, err := cpty.Wait(context.Background())
+	// Раньше тут было cpty.Wait(context.Background()) — оно никогда не
+	// замечало уход клиента, и cmd.exe оставался висеть после закрытия окна.
+	code, err := cpty.Wait(ctx)
+	if ctx.Err() != nil {
+		log.Printf("sshd: клиент %s отключился — завершаю шелл", s.RemoteAddr())
+		return // defer: job.kill() убьёт cmd.exe и потомков, затем cpty.Close()
+	}
 	if err != nil {
 		log.Println("sshd: ошибка ожидания процесса:", err)
 	}

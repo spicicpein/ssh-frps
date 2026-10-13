@@ -83,8 +83,24 @@ func sessionHandler(s ssh.Session) {
 	// пользователя.
 	_, _ = wp.StdIn.Write([]byte("chcp 65001>nul\r\n"))
 
-	// ssh-клиент -> cmd.exe
-	go io.Copy(wp.StdIn, s)
+	// Все процессы сессии (cmd.exe, winpty-agent.exe и всё, что пользователь
+	// запустит из шелла) — в Job Object с KILL_ON_JOB_CLOSE: что бы ни
+	// случилось с сессией, после выхода из функции в системе не остаётся
+	// зомби. Регистрируется ПОСЛЕ defer wp.Close(), поэтому выполнится раньше.
+	job := newKillJob()
+	defer job.kill()
+	h := windows.Handle(wp.GetProcHandle())
+	ah := windows.Handle(wp.AgentProcessHandle())
+	job.add(h, "cmd.exe")
+	job.add(ah, "winpty-agent.exe")
+
+	// ssh-клиент -> cmd.exe. Канал stdinDone закрывается, когда клиент
+	// закрыл ввод (EOF/закрытие канала) — это второй признак ухода клиента.
+	stdinDone := make(chan struct{})
+	go func() {
+		io.Copy(wp.StdIn, s)
+		close(stdinDone)
+	}()
 	// cmd.exe -> ssh-клиент. Канал outDone нужен, чтобы после завершения
 	// процесса дочитать хвост вывода, а не обрезать его раньше времени.
 	outDone := make(chan struct{})
@@ -99,26 +115,64 @@ func sessionHandler(s ssh.Session) {
 		}
 	}()
 
-	// Ждём завершения cmd.exe по его HANDLE. Раньше тут было
-	// os.FindProcess(int(handle)), но FindProcess принимает PID, а не
-	// HANDLE — это разные числа. Вызов падал с ошибкой (либо находил чужой
-	// процесс), Wait() пропускался, и сессия закрывалась сразу после ввода
-	// пароля.
-	code := uint32(0)
-	h := windows.Handle(wp.GetProcHandle())
-	if ev, err := windows.WaitForSingleObject(h, windows.INFINITE); err != nil || ev != windows.WAIT_OBJECT_0 {
-		log.Printf("sshd: не удалось дождаться завершения шелла (event=%d): %v", ev, err)
-	} else if err := windows.GetExitCodeProcess(h, &code); err != nil {
-		log.Println("sshd: не удалось получить код завершения шелла:", err)
+	// Ждём завершения cmd.exe по его HANDLE (os.FindProcess тут не годится —
+	// он принимает PID, а не HANDLE).
+	procDone := make(chan uint32, 1)
+	go func() {
+		var code uint32
+		if ev, err := windows.WaitForSingleObject(h, windows.INFINITE); err != nil || ev != windows.WAIT_OBJECT_0 {
+			log.Printf("sshd: не удалось дождаться завершения шелла (event=%d): %v", ev, err)
+		} else if err := windows.GetExitCodeProcess(h, &code); err != nil {
+			log.Println("sshd: не удалось получить код завершения шелла:", err)
+		}
+		procDone <- code
+	}()
+
+	// Ждём ЛИБО выхода шелла (exit), ЛИБО ухода клиента (закрыл окно/обрыв
+	// связи). Раньше ждали только первого — при закрытии окна обработчик
+	// висел вечно, а cmd.exe и winpty-agent.exe оставались в системе.
+	var code uint32
+	exited := false
+	select {
+	case code = <-procDone:
+		exited = true
+	case <-s.Context().Done():
+		log.Printf("sshd: клиент %s отключился — завершаю шелл", s.RemoteAddr())
+	case <-stdinDone:
+		log.Printf("sshd: клиент %s закрыл ввод — завершаю шелл", s.RemoteAddr())
+	}
+	if !exited {
+		// Если шелл как раз завершается сам — даём ему доиграть, иначе убиваем.
+		select {
+		case code = <-procDone:
+			exited = true
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 
-	// Дочитываем остаток вывода (winpty-agent закроет pipe после выхода
-	// процесса), но не вечно — на случай зависшего агента.
-	select {
-	case <-outDone:
-	case <-time.After(2 * time.Second):
+	if exited {
+		// Обычный выход: дочитываем остаток вывода (агент закроет pipe после
+		// выхода процесса), но не вечно — на случай зависшего агента.
+		select {
+		case <-outDone:
+		case <-time.After(2 * time.Second):
+		}
+		s.Exit(int(code))
+		return // defer: job.kill() добьёт оставшихся потомков, затем wp.Close()
 	}
-	s.Exit(int(code))
+
+	// Клиент ушёл, шелл жив — убиваем явно (Job Object — страховка сверху).
+	_ = windows.TerminateProcess(h, 1)
+	if ah != 0 {
+		_ = windows.TerminateProcess(ah, 1)
+	}
+	job.kill()
+	// Дождаться, пока горутина ожидания увидит смерть процесса, — иначе
+	// wp.Close() закроет хендл прямо под её WaitForSingleObject.
+	select {
+	case <-procDone:
+	case <-time.After(3 * time.Second):
+	}
 }
 
 // runPlain — то же самое, что в современной версии: выполнение одной

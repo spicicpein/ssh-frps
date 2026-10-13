@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -165,8 +166,44 @@ func expandWinEnv(s string) string {
 		if v, ok := os.LookupEnv(name); ok {
 			return v
 		}
+		if v, ok := fallbackHomeEnv(name); ok {
+			return v
+		}
+		log.Printf("переменная окружения %%%s%% не определена в окружении процесса — оставляю как есть", name)
 		return m
 	})
+}
+
+// fallbackHomeEnv восстанавливает USERPROFILE/HOMEDRIVE/HOMEPATH, если их нет
+// в окружении процесса. Эти переменные выставляет Windows при интерактивном
+// входе; у процесса, запущенного как служба, от SYSTEM или из планировщика,
+// HOMEDRIVE/HOMEPATH обычно отсутствуют (а иногда и USERPROFILE). Берём
+// профиль учётной записи, под которой работает программа, напрямую из ОС.
+func fallbackHomeEnv(name string) (string, bool) {
+	home := ""
+	if u, err := user.Current(); err == nil {
+		home = u.HomeDir
+	}
+	if home == "" {
+		if h, err := os.UserHomeDir(); err == nil {
+			home = h
+		}
+	}
+	if home == "" {
+		return "", false
+	}
+	vol := filepath.VolumeName(home)
+	switch strings.ToUpper(name) {
+	case "USERPROFILE":
+		return home, true
+	case "HOMEDRIVE":
+		if vol != "" {
+			return vol, true
+		}
+	case "HOMEPATH":
+		return strings.TrimPrefix(home, vol), true
+	}
+	return "", false
 }
 
 // connectProxyCfg — один прокси-сервер (SOCKS5 или HTTP) для подключения
