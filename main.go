@@ -336,35 +336,74 @@ func egressShadowsocksPort(e winsshExtra) int {
 	return 0
 }
 
-// простой троттлинг перебора: чем больше подряд неудачных попыток с одного IP,
-// тем дольше сервер тупит перед ответом. Ничего не блокирует навсегда, просто
-// делает автоматический перебор бессмысленно медленным.
+// Троттлинг перебора паролей (и для встроенного sshd, и для egress-прокси).
+//
+// Ключ — только IP клиента, без порта. Раньше ключом была строка "ip:порт", а
+// порт у каждого нового соединения свой, поэтому счётчик неудач никогда не
+// накапливался и защита фактически не работала (плюс карта росла без границ).
+//
+// ВАЖНО: клиенты, пришедшие через frp, все выглядят как 127.0.0.1 (реальный
+// адрес знает только frps), поэтому для них это ОДНА общая корзина: неудачи
+// одного человека замедляют всех, пока кто-то не войдёт успешно. Основная
+// защита от перебора из интернета — ограничение доступа к remotePort на
+// фаерволе VDS (по IP офиса/сотрудников) и длинный пароль; троттлинг — вторая
+// линия обороны.
 type throttle struct {
 	mu    sync.Mutex
 	fails map[string]int
+	slots chan struct{} // не более N проверок одновременно, иначе перебор параллелится
 }
 
-func (t *throttle) delay(remote string) {
+var (
+	throttleStep     = 2 * time.Second // прибавка к задержке за каждую подряд неудачу
+	throttleMaxDelay = 30 * time.Second
+)
+
+func newThrottle() *throttle {
+	return &throttle{fails: make(map[string]int), slots: make(chan struct{}, 16)}
+}
+
+func throttleKey(remote string) string {
+	if host, _, err := net.SplitHostPort(remote); err == nil {
+		return host
+	}
+	return remote
+}
+
+// enter занимает слот проверки и выдерживает задержку, положенную за прежние
+// неудачи. ok=false — слишком много проверок одновременно (похоже на
+// параллельный перебор): такую попытку отклоняем сразу, без проверки пароля.
+func (t *throttle) enter(remote string) (release func(), ok bool) {
+	select {
+	case t.slots <- struct{}{}:
+	default:
+		return nil, false
+	}
 	t.mu.Lock()
-	n := t.fails[remote]
+	n := t.fails[throttleKey(remote)]
 	t.mu.Unlock()
 	if n > 0 {
-		d := time.Duration(n) * 2 * time.Second
-		if d > 30*time.Second {
-			d = 30 * time.Second
+		d := time.Duration(n) * throttleStep
+		if d > throttleMaxDelay {
+			d = throttleMaxDelay
 		}
 		time.Sleep(d)
 	}
+	return func() { <-t.slots }, true
 }
 
 func (t *throttle) record(remote string, ok bool) {
+	key := throttleKey(remote)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if ok {
-		delete(t.fails, remote)
-	} else {
-		t.fails[remote]++
+		delete(t.fails, key)
+		return
 	}
+	if len(t.fails) > 10000 { // не растём бесконечно под атакой с разных адресов
+		t.fails = make(map[string]int)
+	}
+	t.fails[key]++
 }
 
 // runApp — вся боевая логика: встроенный sshd + tiny-frpc клиент. Раньше
@@ -389,7 +428,7 @@ func runApp() {
 	port := sshdPort(extra)
 	addr := fmt.Sprintf(":%d", port)
 
-	th := &throttle{fails: make(map[string]int)}
+	th := newThrottle()
 
 	go func() {
 		srv := &ssh.Server{
@@ -405,14 +444,16 @@ func runApp() {
 			},
 			PasswordHandler: func(ctx ssh.Context, pass string) bool {
 				remote := ctx.RemoteAddr().String()
-				th.delay(remote)
+				release, allowed := th.enter(remote)
+				if !allowed {
+					log.Printf("auth: слишком много одновременных попыток входа (%s) — отклоняю", remote)
+					return false
+				}
+				defer release()
 				ok := subtle.ConstantTimeCompare([]byte(pass), []byte(password)) == 1
 				th.record(remote, ok)
-				log.Printf("auth: user=%q pass_len=%d expected_len=%d ok=%v from=%s",
-					ctx.User(), len(pass), len(password), ok, remote)
-				if !ok {
-					log.Printf("auth: expected=%q got=%q", password, pass)
-				}
+				// Пароли (ни настоящий, ни введённый) в лог не пишем.
+				log.Printf("auth: user=%q ok=%v from=%s", ctx.User(), ok, remote)
 				return ok
 			},
 		}

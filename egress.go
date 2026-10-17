@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -25,6 +26,28 @@ import (
 //  egressShadowsocks). Каждый — на своём порту, включаются независимо
 //  друг от друга.
 // ═══════════════════════════════════════════════════════════════════════
+
+// egressThrottle защищает авторизацию egress-прокси от перебора (см. throttle
+// в main.go — там же оговорка про то, что через frp все клиенты выглядят как
+// 127.0.0.1).
+var egressThrottle = newThrottle()
+
+// egressAuth выполняет проверку учётных данных под троттлингом. check
+// вызывается только после выдержанной задержки и должен сравнивать данные за
+// постоянное время. tooMany=true — слишком много параллельных попыток.
+func egressAuth(w net.Conn, check func() bool) (good, tooMany bool) {
+	remote := w.RemoteAddr().String()
+	release, allowed := egressThrottle.enter(remote)
+	if !allowed {
+		return false, true
+	}
+	defer release()
+	// Задержка могла быть долгой — продлеваем дедлайн хендшейка.
+	_ = w.SetReadDeadline(time.Now().Add(15 * time.Second))
+	good = check()
+	egressThrottle.record(remote, good)
+	return good, false
+}
 
 // ── SOCKS5/HTTP (один порт, протокол определяется автоматически по
 //    первому байту соединения) ──────────────────────────────────────────
@@ -143,7 +166,16 @@ func socks5ServerHandshake(r *bufio.Reader, w net.Conn, authRequired bool, user,
 		if _, err := io.ReadFull(r, passBuf); err != nil {
 			return "", err
 		}
-		if string(uname) != user || string(passBuf) != pass {
+		good, tooMany := egressAuth(w, func() bool {
+			u := subtle.ConstantTimeCompare(uname, []byte(user))
+			p := subtle.ConstantTimeCompare(passBuf, []byte(pass))
+			return u&p == 1
+		})
+		if tooMany {
+			_, _ = w.Write([]byte{0x01, 0x01})
+			return "", fmt.Errorf("слишком много одновременных попыток авторизации")
+		}
+		if !good {
 			_, _ = w.Write([]byte{0x01, 0x01})
 			return "", fmt.Errorf("неверный логин/пароль")
 		}
@@ -239,7 +271,14 @@ func httpConnectServerHandshake(r *bufio.Reader, w net.Conn, authRequired bool, 
 
 	if authRequired {
 		expected := "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
-		if gotAuth != expected {
+		good, tooMany := egressAuth(w, func() bool {
+			return subtle.ConstantTimeCompare([]byte(gotAuth), []byte(expected)) == 1
+		})
+		if tooMany {
+			_, _ = io.WriteString(w, "HTTP/1.1 429 Too Many Requests\r\n\r\n")
+			return "", fmt.Errorf("слишком много одновременных попыток авторизации")
+		}
+		if !good {
 			_, _ = io.WriteString(w, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"winssh-tunnel\"\r\n\r\n")
 			return "", fmt.Errorf("неверная или отсутствующая авторизация")
 		}
