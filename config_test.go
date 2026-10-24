@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -97,5 +98,57 @@ func TestEgressProxiesRegisterWithFrp(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Errorf("не зарегистрированы: %v", want)
+	}
+}
+
+// Пример из документации обязан быть рабочим: берём сам frpc-example.toml,
+// раскомментируем всё из секций 5-6 (egress-настройки и все примеры
+// [[proxies]]) и проверяем, что результат читают и наш код, и загрузчик
+// tiny-frpc. Ловит, например, настройки egress, оказавшиеся ниже первого
+// [[proxies]] (в TOML они стали бы полями прокси, и программа их не увидела бы).
+func TestExampleConfigWithEverythingEnabled(t *testing.T) {
+	raw, err := os.ReadFile("frpc-example.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	idx := strings.Index(text, "# ── 5. Egress")
+	if idx < 0 {
+		t.Fatal("в frpc-example.toml нет секции 5 (Egress)")
+	}
+	re := regexp.MustCompile(`(?m)^# ((?:egress\w+ = .*)|(?:\[\[proxies\]\])|(?:name = .*)|(?:type = .*)|(?:localPort = .*)|(?:remotePort = .*))$`)
+	enabled := text[:idx] + re.ReplaceAllString(text[idx:], "$1")
+
+	var e winsshExtra
+	if err := toml.Unmarshal([]byte(enabled), &e); err != nil {
+		t.Fatalf("toml: %v", err)
+	}
+	if got := sshdPort(e); got != 2222 {
+		t.Errorf("sshdPort = %d, ожидалось 2222", got)
+	}
+	if got := egressSocksPort(e); got != 1080 {
+		t.Errorf("egressSocksPort = %d, ожидалось 1080 (настройки egress ниже [[proxies]]?)", got)
+	}
+	if got := egressShadowsocksPort(e); got != 1081 {
+		t.Errorf("egressShadowsocksPort = %d, ожидалось 1081", got)
+	}
+	if !e.EgressSocksAuth || e.EgressSocksUser == "" || e.EgressSocksPass == "" {
+		t.Errorf("настройки авторизации SOCKS не прочитаны: %+v", e)
+	}
+	if e.EgressShadowsocksPassword == "" {
+		t.Errorf("пароль Shadowsocks не прочитан: %+v", e)
+	}
+
+	path := filepath.Join(t.TempDir(), "frpc.toml")
+	if err := os.WriteFile(path, []byte(enabled), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, proxyCfgs, visitorCfgs, _, err := config.LoadClientConfig(path, false)
+	if err != nil {
+		t.Fatalf("tiny-frpc не принял пример: %v", err)
+	}
+	// ssh + rdp + smb + egress-socks + egress-ss + произвольный сервис
+	if n := len(config.ParseFRPCConfigToGoSSHParam(cfg, proxyCfgs, visitorCfgs)); n != 6 {
+		t.Errorf("зарегистрировано %d прокси, ожидалось 6", n)
 	}
 }
