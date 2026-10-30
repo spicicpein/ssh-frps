@@ -298,29 +298,32 @@ UTF-8.
 современных версиях.
 
 
-## Минимальная версия Windows
+## Минимальная версия Windows и два варианта сборки
 
-**Windows 10, сборка 1809 (October 2018 Update) / Windows Server
-2019 — и новее.** Это жёсткий минимум для интерактивного шелла: он
-использует ConPTY — системный API, которого попросту не существует
-на более старых версиях Windows. Без ConPTY интерактивный вход
-откажется работать с понятной ошибкой в логе — но **не-интерактивные
-команды** (`ssh host команда`) и **SFTP** от ConPTY не зависят и
-должны работать даже на старых системах, так как используют только
-обычные pipe'ы, без псевдотерминала.
+| Файл | Для чего | Что нужно рядом |
+|---|---|---|
+| `winssh-tunnel.exe` | Windows 10 1809+ / Server 2019+: интерактивный шелл через ConPTY | ничего, один файл |
+| `winssh-tunnel-legacy.exe` | Windows 7 / 8 / 8.1 / Server 2008R2–2012R2: шелл через winpty | `winpty.dll` и `winpty-agent.exe` в той же папке |
 
-Для реально старых систем (Windows 7 / 8 / 8.1, Server 2008R2 / 2012
-/ 2012R2) в проекте есть исходники legacy-варианта интерактивного
-шелла — через `winpty` (предшественник ConPTY, обходит проблему
-скрытым консольным окном вместо системного API) вместо ConPTY, см.
-`shell_windows_legacy.go` и `BUILD-LEGACY.md`. **Честно:** это
-отдельная сборка (`-tags legacy`, Go 1.20, требует `winpty.dll` и
-`winpty-agent.exe` рядом с exe) — сегодня она не пересобиралась и не
-тестировалась заново вместе со всеми последними изменениями (dual
-listeners, служба, `shellDir`, chcp-фикс). Код для неё поддерживается
-в актуальном состоянии (те же фиксы применены и туда), но
-опубликованного бинарника для старых систем пока нет — если он тебе
-нужен, скажи, соберём и проверим отдельно.
+Функции у обоих одинаковые (SSH, SFTP, frp-туннель, egress, служба),
+различается способ запуска интерактивного шелла и тулчейн сборки. ConPTY
+появился только в Windows 10 1809, поэтому на старых системах обычный exe
+выводит понятное сообщение (оно держится 8 секунд, чтобы PuTTY не закрыл
+окно раньше) и завершает сессию; SFTP и одиночные команды
+(`ssh host команда`) от ConPTY не зависят и работают.
+
+Legacy собран патченым тулчейном [XTLS/go-win7](https://github.com/XTLS/go-win7):
+стандартный Go убрал поддержку этих систем (последний официально
+поддерживающий их — Go 1.20), а go-win7 — это Go с исправлениями рантайма
+для NT 6.1–6.3. Обычный exe собран стандартным Go и для Windows 7/8/2012
+не предназначен — на них используй legacy.
+
+**Что проверено:** legacy на Windows Server 2012 — вход, интерактивный шелл,
+стартовая папка, SFTP, завершение `cmd.exe`/`winpty-agent.exe` при закрытии
+окна и по `exit`. Windows 7, 8.1 и Server 2008R2 не проверялись. Windows
+Vista (NT 6.0) go-win7 не заявляет — её поддержка не обещана.
+
+Как собрать legacy самому — в `BUILD-LEGACY.md`.
 
 
 ## Ограничения (честно, по текущему состоянию)
@@ -355,27 +358,35 @@ listeners, служба, `shellDir`, chcp-фикс). Код для неё под
 ## Файлы проекта
 
 ```
-winssh-tunnel.exe            — готовый бинарник
+winssh-tunnel.exe, winssh-tunnel-legacy.exe   — готовые бинарники
+winpty.dll, winpty-agent.exe                  — нужны только legacy-версии
 frpc-example.toml            — пример конфига с подробными комментариями
-main.go                      — конфиг, пароль, порт, ключи, sshd, tiny-frpc, разбор аргументов
-service_windows.go           — установка/управление службой Windows (install/uninstall/start/stop)
+main.go                      — конфиг, пароль, порты, ключи, sshd, троттлинг, разбор аргументов
+tunnel.go                    — подключение к frps (direct/proxy/auto), SOCKS5/HTTP-клиенты, переподключение
+egress.go                    — встроенные SOCKS5/HTTP и Shadowsocks серверы
+service_windows.go           — установка и управление службой Windows
 service_other.go             — заглушка для не-Windows платформ
-shell_windows_modern.go      — интерактивный шелл через ConPTY (Windows 10 1809+)
-shell_windows_legacy.go      — интерактивный шелл через winpty (Windows 7+, отдельная сборка)
-shell_other.go                — заглушка для linux/mac (нужна только для разработки/тестов)
-sftp.go                        — SFTP-подсистема, общая для всех платформ
-BUILD-LEGACY.md                — как собрать legacy-версию (Windows 7/Server 2008R2+)
+shell_windows_modern.go      — интерактивный шелл через ConPTY
+shell_windows_legacy.go      — интерактивный шелл через winpty (тег сборки legacy)
+shell_common_windows.go      — Job Object (уборка процессов сессии), вывод ошибок шелла
+shell_other.go               — заглушка для linux/mac (только для разработки и тестов)
+sftp.go                      — SFTP-подсистема
+*_test.go                    — тесты (в том числе с настоящим curl)
+vendor/                      — зависимости целиком: сборка не требует доступа к proxy.golang.org
+BUILD-LEGACY.md              — сборка legacy-версии
 ```
 
 
 ## Сборка из исходников
 
 ```bash
-go mod tidy
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o winssh-tunnel.exe .
+# обычная версия, Go >= 1.23
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -mod=vendor -o winssh-tunnel.exe .
+
+# тесты (тесты с curl пропускаются, если curl не установлен)
+CGO_ENABLED=0 go test -mod=vendor ./...
 ```
-Go ≥ 1.22. Про сборку legacy-версии (другой Go, другие версии
-зависимостей) — см. `BUILD-LEGACY.md`.
+Legacy-версия собирается другим тулчейном — см. `BUILD-LEGACY.md`.
 
 
 ## Дальше в разработке
