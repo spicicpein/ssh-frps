@@ -1,5 +1,8 @@
-name: Build & Release
+name: Release
 
+# Релиз собирается из готовых бинарников, лежащих в репозитории (exe собираются
+# заранее, см. README/BUILD-LEGACY.md): workflow лишь проверяет, что все файлы
+# на месте, и публикует их на странице Releases при пуше тега v*.
 on:
   push:
     tags:
@@ -14,35 +17,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check exe exists
+      - name: Check binaries exist
         run: |
-          ls -lh winssh-tunnel.exe
-          file winssh-tunnel.exe
+          for f in winssh-tunnel.exe winssh-tunnel-legacy.exe winpty.dll winpty-agent.exe frpc-example.toml README.md; do
+            test -s "$f" || { echo "нет файла $f"; exit 1; }
+          done
+          ls -lh winssh-tunnel.exe winssh-tunnel-legacy.exe winpty.dll winpty-agent.exe
+          sha256sum winssh-tunnel.exe winssh-tunnel-legacy.exe winpty.dll winpty-agent.exe
+
+      - name: Write release notes
+        run: |
+          cat > RELEASE_NOTES.md << 'NOTES'
+          ## winssh-tunnel ${{ github.ref_name }}
+
+          Выбери файлы под свою версию Windows:
+
+          | Файлы | Для чего |
+          |---|---|
+          | `winssh-tunnel.exe` | Windows 10 1809+ / Server 2019+ (один файл) |
+          | `winssh-tunnel-legacy.exe` + `winpty.dll` + `winpty-agent.exe` | Windows 7 / 8 / 8.1 / Server 2008R2-2012R2 (все три файла в одной папке) |
+
+          Конфиг: скопируй `frpc-example.toml` в `frpc.toml` рядом с exe и заполни (все параметры прокомментированы). Подробности, установка как службы, egress-прокси (SOCKS5/HTTP и Shadowsocks) — в `README.md`.
+
+          Что внутри: встроенный SSH-сервер с интерактивным шеллом (ConPTY или winpty) и SFTP, клиент frp (SSH Tunnel Gateway) с подключением напрямую или через SOCKS5/HTTP-прокси, служба Windows, стартовая папка `shellDir`, egress SOCKS5/HTTP и Shadowsocks, завершение шелла и его процессов при закрытии окна клиента.
+
+          **Безопасность.** Не используй exe из ветки main, скачанные до 17.10.2026: в них при неудачном входе в консоль печатался настоящий пароль, а защита от перебора не работала. В этом релизе оба дефекта исправлены.
+          NOTES
 
       - name: Create GitHub Release
         run: |
           gh release create "${{ github.ref_name }}" \
-            winssh-tunnel.exe \
-            README.md \
-            frpc-example.toml \
+            winssh-tunnel.exe winssh-tunnel-legacy.exe winpty.dll winpty-agent.exe \
+            frpc-example.toml README.md \
             --title "winssh-tunnel ${{ github.ref_name }}" \
-            --notes "## winssh-tunnel ${{ github.ref_name }}
-
-          Полнофункциональный SSH-сервер с FRP-туннелированием для Windows.
-
-          ### Что включено в exe (~9.5 МБ):
-          - ✅ **SSH Server** (gliderlabs/ssh) с интерактивным шеллом через ConPTY
-          - ✅ **SFTP** передача файлов (pkg/sftp)
-          - ✅ **FRP Client** туннель через frp SSH Tunnel Gateway (gofrp/tiny-frpc)
-          - ✅ Установка как служба Windows (install/uninstall/start/stop)
-          - ✅ Монолитный exe, без внешних DLL
-
-          ### Быстрый старт:
-          1. Скопируй \`frpc-example.toml\` → \`frpc.toml\`
-          2. Заполни адрес VPS, токен и пароль (см. комментарии в файле)
-          3. Запусти \`winssh-tunnel.exe\`
-          4. Подключайся: \`ssh -p 65000 user@твой.vps.com\`
-
-          Подробности — в README.md."
+            --notes-file RELEASE_NOTES.md
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
