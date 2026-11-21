@@ -63,6 +63,31 @@ auth.token = "ВАШ_AUTH_TOKEN"
 # user = "myuser"
 # pass = "mypass"
 
+# Профиль A — только локальный SOCKS5 (например, клиент корпоративного VPN
+# слушает 127.0.0.1:1080). Скопируй строки, сними # и замени порт при нужде:
+# connectMode = "proxy"
+# [[connectProxy]]
+# type = "socks5"
+# addr = "127.0.0.1:1080"
+# auth = false
+
+# Профиль B — сначала прямое подключение, затем два резервных прокси.
+# Если прямой выход точно закрыт firewall, используй connectMode = "proxy".
+# connectMode = "auto"
+# [[connectProxy]]
+# type = "socks5"
+# addr = "socks.corp.example:1080"
+# auth = true
+# user = "employee"
+# pass = "ЗАМЕНИТЬ_ПАРОЛЬ"
+# [[connectProxy]]
+# type = "http"
+# addr = "http-proxy.example:8080"
+# auth = false
+
+# ВАЖНО: connectMode и все [[connectProxy]] должны быть выше первого
+# [[proxies]] (включая расположенный ниже обязательный winssh).
+
 
 # ── 3. Пароль для встроенного SSH-сервера ───────────────────────────────────
 
@@ -161,6 +186,23 @@ winsshPassword = "ВАШ_SSH_ПАРОЛЬ"
 # socks5h:// (curl), чтобы имена сайтов разрешала Windows-машина, а не
 # компьютер сотрудника.
 
+# Рецепт SOCKS5/HTTP с авторизацией: используй эти значения вместо примера
+# выше; строки с ## — шаблон, скопируй их и убери ##. Этот порт доступен
+# через frps — закрой его firewall'ом для всех, кроме доверенных адресов.
+# На клиенте, например:
+#   curl --proxy socks5h://employee:ЗАМЕНИТЬ_ПАРОЛЬ@ВАШ_VPS:65010 https://ifconfig.me
+## egressSocksAuth = true
+## egressSocksUser = "employee"
+## egressSocksPass = "ДЛИННЫЙ_СЛУЧАЙНЫЙ_ПАРОЛЬ"
+
+# Рецепт Shadowsocks: замени параметры выше, скопировав и убрав ##; в
+# Shadowsocks-клиенте выбери тот же метод и пароль. Зашифрован участок
+# клиент → VDS; приложения подключай к локальному SOCKS этого клиента.
+## egressShadowsocksMethod = "aes-256-gcm"
+## egressShadowsocksPassword = "ДЛИННЫЙ_СЛУЧАЙНЫЙ_ПАРОЛЬ"
+
+# Эти глобальные параметры должны быть установлены ДО первого [[proxies]].
+
 
 # ── 6. Туннели (проксируемые сервисы) ────────────────────────────────────────
 
@@ -226,6 +268,34 @@ remotePort = 65000         # внешний порт на frps — свобод�
 # type = "tcp"
 # localPort = 8080
 # remotePort = 65003
+
+# ── Рецепт: RDP наружу через VDS ──
+# Убедись, что Remote Desktop включён в Windows и порт 3389 слушается.
+# Раскомментируй обычный пример RDP выше, разреши remotePort в firewall VDS
+# только для доверенных IP; с Windows-клиента подключайся так:
+#   mstsc /v:ВАШ_VPS:65001
+
+# ── Рецепт: SSH + RDP + SMB одновременно ──
+# SSH уже включён выше. Для RDP и SMB добавь обе секции; каждому сервису
+# нужен свой remotePort, а localPort должен совпадать с портом службы Windows.
+# SMB обычно требует дополнительные настройки firewall и прав общего ресурса.
+## [[proxies]]
+## name = "rdp"
+## type = "tcp"
+## localPort = 3389
+## remotePort = 65001
+## [[proxies]]
+## name = "smb"
+## type = "tcp"
+## localPort = 445
+## remotePort = 65002
+
+# ── Рецепт запуска ──
+# Обычный запуск с этим конфигом:
+#   winssh-tunnel.exe -c "C:\winssh\frpc.toml"
+# Установка службы (командная строка от администратора):
+#   winssh-tunnel.exe --install -c "C:\winssh\frpc.toml"
+# После изменения конфигурации перезапусти приложение/службу.
 
 
 # ══════════════════════════════════════════════════════════════════════════

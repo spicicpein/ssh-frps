@@ -150,6 +150,13 @@ func parseArgs(args []string) parsedArgs {
 	return p
 }
 
+// serviceCommandArgs возвращает аргументы, записываемые в ImagePath службы.
+// Имя службы не передаём как -k: новый процесс службы находит собственное имя
+// по PID через SCM. Это также не ломает старые службы, которые уже хранят -k.
+func serviceCommandArgs(configPath string) []string {
+	return []string{"-c", configPath}
+}
+
 var winEnvVarPattern = regexp.MustCompile(`%([^%]+)%`)
 
 // expandWinEnv раскрывает переменные окружения в стиле cmd.exe —

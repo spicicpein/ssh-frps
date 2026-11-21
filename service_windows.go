@@ -65,12 +65,10 @@ func runServiceAware(args parsedArgs, app func()) {
 	}
 
 	if isService {
-		// Ключ реестра, под которым нас должен был запустить SCM, приходит
-		// как -k в args (мы всегда прописываем его в аргументы службы при
-		// установке — см. installService) — так svc.Run() регистрируется
-		// под тем же именем, что и сама служба, даже если их несколько на
-		// одном exe.
-		runAsService(app, regKeyOrDefault(args.RegKey))
+		// Старые установленные службы всё ещё передают имя через -k.
+		// Новые службы не добавляют -k в ImagePath, поэтому runAsService
+		// определяет имя службы по PID через Service Control Manager.
+		runAsService(app, args.RegKey)
 		return
 	}
 
@@ -117,6 +115,14 @@ func (s *winsshService) Execute(args []string, r <-chan svc.ChangeRequest, chang
 }
 
 func runAsService(app func(), regKey string) {
+	if regKey == "" {
+		var err error
+		regKey, err = currentServiceName()
+		if err != nil {
+			log.Printf("не удалось определить имя службы через SCM: %v", err)
+			return
+		}
+	}
 	elog, err := eventlog.Open(regKey)
 	if err == nil {
 		defer elog.Close()
@@ -127,6 +133,36 @@ func runAsService(app func(), regKey string) {
 			elog.Error(1, fmt.Sprintf("winssh-tunnel: ошибка службы: %v", err))
 		}
 	}
+}
+
+// currentServiceName ищет службу, которой принадлежит текущий процесс.
+// Используется только при запуске из SCM без старого аргумента -k.
+// EnumServicesStatusEx доступна начиная с Windows Vista, то есть поддерживает
+// и legacy-цель проекта (Windows 7 / Server 2008 R2 и новее).
+func currentServiceName() (string, error) {
+	m, err := mgr.Connect()
+	if err != nil {
+		return "", fmt.Errorf("не удалось подключиться к SCM: %w", err)
+	}
+	defer m.Disconnect()
+
+	names, err := m.ListServices()
+	if err != nil {
+		return "", fmt.Errorf("не удалось перечислить службы: %w", err)
+	}
+	pid := uint32(os.Getpid())
+	for _, name := range names {
+		s, err := m.OpenService(name)
+		if err != nil {
+			continue
+		}
+		status, queryErr := s.Query()
+		_ = s.Close()
+		if queryErr == nil && status.ProcessId == pid {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("SCM не нашёл службу с PID %d", pid)
 }
 
 // installService регистрирует Windows-службу, указывающую на ТЕКУЩИЙ exe
@@ -179,15 +215,14 @@ func installService(args parsedArgs) error {
 		return fmt.Errorf("служба с ключом %q уже установлена (сначала: winssh-tunnel.exe --uninstall -k %s)", regKey, regKey)
 	}
 
-	// -c и -k прописываем в сами аргументы запуска службы: SCM будет
-	// передавать их при КАЖДОМ старте — это и есть то, как один и тот же
-	// exe узнаёт при запуске под SCM, какой конфиг читать и под каким
-	// именем регистрироваться в svc.Run().
+	// Передаём только путь к конфигу. Имя службы определяется из SCM по PID;
+	// это исключает -k из ImagePath и сохраняет возможность нескольких
+	// экземпляров одного exe. Старые службы с -k продолжают поддерживаться.
 	s, err := m.CreateService(regKey, exePath, mgr.Config{
 		DisplayName: dispName,
 		Description: desc,
 		StartType:   mgr.StartAutomatic,
-	}, "-c", absConfigPath, "-k", regKey)
+	}, serviceCommandArgs(absConfigPath)...)
 	if err != nil {
 		return fmt.Errorf("не могу создать службу: %w", err)
 	}
